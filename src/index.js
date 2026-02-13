@@ -2,7 +2,7 @@ import config from './config.js';
 import logger from './logger.js';
 import db, { getSetting, setSetting } from './db/index.js';
 import AlertsPoller from './alerts/poller.js';
-import MTProtoCollector from './mtproto/collector.js';
+import { getMtprotoClient } from './mtproto/singleton.js';
 import Pipeline from './pipeline/engine.js';
 import AdminBot from './bot/adminBot.js';
 
@@ -12,23 +12,23 @@ async function main() {
   }
 
   let pipeline;
-  const mtproto = new MTProtoCollector({ db, logger, onEvent: async (event) => pipeline.ingest(event) });
+  const mtproto = getMtprotoClient({ db, logger, onEvent: async (event) => pipeline.ingest(event) });
   const admin = new AdminBot({ config, db, getSetting, setSetting, pipeline: { approve: (...a) => pipeline.approve(...a), reject: (...a) => pipeline.reject(...a) }, mtproto, logger });
   pipeline = new Pipeline({ db, getSetting, bot: admin.bot, logger });
 
   const alerts = new AlertsPoller({ onEvent: async (event) => pipeline.ingest(event), logger, getSetting });
 
+  await mtproto.start();
   await admin.launch();
   logger.info('Адмін-бот запущено');
 
-  await mtproto.start();
   alerts.start();
   logger.info('Poller тривог запущено');
 
   const shutdown = async () => {
     alerts.stop();
     admin.bot.stop('SIGTERM');
-    if (mtproto.client) await mtproto.client.disconnect();
+    await mtproto.stop();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);

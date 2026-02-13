@@ -33,7 +33,7 @@ export default class AdminBot {
     });
 
     this.bot.start((ctx) => ctx.reply('Вітаю. Доступні команди: /help'));
-    this.bot.help((ctx) => ctx.reply('/duty on|off\n/mode night|day|manual\n/status\n/queue\n/sources\n/source_add [@username|link]\n/source_on <id>\n/source_off <id>\n/health\n/settings\n/set <key> <value>'));
+    this.bot.help((ctx) => ctx.reply('/duty on|off\n/mode night|day|manual\n/status\n/mtproto\n/queue\n/sources\n/source_add [@username|link]\n/source_on <id>\n/source_off <id>\n/health\n/settings\n/set <key> <value>'));
 
     this.bot.command('duty', async (ctx) => {
       const value = (ctx.message.text.split(' ')[1] || '').toLowerCase();
@@ -54,7 +54,15 @@ export default class AdminBot {
     this.bot.command('status', (ctx) => {
       const queue = this.db.prepare("SELECT COUNT(*) c FROM queue WHERE status='pending'").get().c;
       const last = this.db.prepare('SELECT created_at FROM events ORDER BY id DESC LIMIT 1').get();
-      return ctx.reply(`Чергування: ${this.getSetting('duty_enabled', 'false')}\nРежим: ${uaMode[this.getSetting('mode', 'manual')]}\nОстання подія: ${last?.created_at || 'нема'}\nЧерга: ${queue}`);
+      const mt = this.mtproto.getStatus();
+      const mtLine = `MTProto: ${mt.connected ? 'connected' : 'disconnected'} (${mt.reason})`;
+      return ctx.reply(`Чергування: ${this.getSetting('duty_enabled', 'false')}\nРежим: ${uaMode[this.getSetting('mode', 'manual')]}\nОстання подія: ${last?.created_at || 'нема'}\nЧерга: ${queue}\n${mtLine}`);
+    });
+
+
+    this.bot.command('mtproto', (ctx) => {
+      const mt = this.mtproto.getStatus();
+      return ctx.reply(`MTProto: ${mt.connected ? 'connected' : 'disconnected'}\nПричина: ${mt.reason}`);
     });
 
     this.bot.command('queue', async (ctx) => {
@@ -129,7 +137,12 @@ export default class AdminBot {
       this.db.prepare('INSERT INTO sources(chat_id,username,title,enabled) VALUES(?,?,?,1) ON CONFLICT(chat_id) DO UPDATE SET username=excluded.username,title=excluded.title').run(r.chat_id, r.username, r.title);
       await ctx.reply(`Джерело додано: ${r.title} (${r.chat_id})`);
     } catch (e) {
-      await ctx.reply(`Не вдалося додати джерело: ${e.message}`);
+      const msg = String(e.message || 'невідома помилка');
+      if (msg.startsWith('MTProto не підключено:')) {
+        await ctx.reply(msg);
+        return;
+      }
+      await ctx.reply(`Не вдалося додати джерело: ${msg}`);
     }
   }
 

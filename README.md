@@ -17,6 +17,7 @@
 - `/duty on|off`
 - `/mode night|day|manual`
 - `/status`
+- `/mtproto` (стан підключення + причина)
 - `/queue` (+ кнопки approve/reject)
 - `/sources`, `/source_add`, `/source_on <id>`, `/source_off <id>`
 - `/health`, `/settings`, `/set <key> <value>`
