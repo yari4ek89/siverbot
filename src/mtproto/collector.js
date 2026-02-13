@@ -62,7 +62,7 @@ export default class MTProtoCollector {
           const chatId = msg.peerId?.channelId?.toString?.();
           if (!chatId) return;
 
-          const src = this.db.prepare('SELECT id FROM sources WHERE chat_id=? AND enabled=1').get(chatId);
+          const src = this.db.prepare("SELECT id, COALESCE(username,title,chat_id) AS source_name, COALESCE(trust_level,'B') AS trust_level FROM sources WHERE chat_id=? AND enabled=1").get(chatId);
           if (!src) return;
 
           const text = (msg.message || '').trim();
@@ -71,6 +71,8 @@ export default class MTProtoCollector {
           await this.onEvent({
             source: 'mtproto',
             source_id: src.id,
+            source_name: src.source_name,
+            trust_level: String(src.trust_level || 'B').toUpperCase(),
             source_ref: chatId,
             msg_id: String(msg.id),
             date: msg.date ? new Date(msg.date * 1000).toISOString() : new Date().toISOString(),

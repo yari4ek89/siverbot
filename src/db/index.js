@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS sources(
   chat_id TEXT UNIQUE NOT NULL,
   username TEXT,
   title TEXT,
-  trust_level TEXT DEFAULT 'trusted',
+  trust_level TEXT DEFAULT 'B',
   enabled INTEGER DEFAULT 1,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -19,6 +19,8 @@ CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source TEXT NOT NULL,
   source_id INTEGER,
+  source_name TEXT,
+  trust_level TEXT,
   msg_id TEXT,
   source_ref TEXT,
   date TEXT,
@@ -33,6 +35,7 @@ CREATE TABLE IF NOT EXISTS events(
 CREATE TABLE IF NOT EXISTS published(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   signature TEXT NOT NULL,
+  source_ref TEXT,
   posted_at TEXT,
   channel_message_id TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS queue(
   event_id INTEGER NOT NULL,
   reason TEXT,
   status TEXT DEFAULT 'pending',
+  preview_redacted TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   decided_at TEXT
 );
@@ -51,14 +55,35 @@ CREATE TABLE IF NOT EXISTS errors(
   message TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS clusters(
+  signature TEXT PRIMARY KEY,
+  count INTEGER DEFAULT 0,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 `);
+
+
+function ensureColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+
+ensureColumn('events', 'source_name', 'source_name TEXT');
+ensureColumn('events', 'trust_level', 'trust_level TEXT');
+ensureColumn('published', 'source_ref', 'source_ref TEXT');
+ensureColumn('queue', 'preview_redacted', 'preview_redacted TEXT');
 
 const upsert = db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
 const defaults = {
   duty_enabled: 'false',
   mode: 'manual',
+  focus_mode: config.app.focusMode,
   dedup_window_min: String(config.app.dedupWindowMin),
-  autopost_unverified_day: String(config.app.autopostUnverifiedDay),
+  per_source_cooldown_sec: String(config.app.perSourceCooldownSec),
+  global_rate_max: String(config.app.globalRateMax),
+  global_rate_window_min: String(config.app.globalRateWindowMin),
+  digest_interval_min: String(config.app.digestIntervalMin),
+  last_suppressed_count: '0',
   allow_a_alarms_in_manual: String(config.app.allowAAlarmsInManual),
   confirm_count: String(config.alerts.confirmCount),
   cooldown_seconds: String(config.alerts.cooldownSeconds),

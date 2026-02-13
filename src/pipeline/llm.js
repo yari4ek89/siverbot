@@ -1,11 +1,20 @@
 import config from '../config.js';
 import { hasUnsafe, redactUnsafe } from './safety.js';
 
+let lastLlmError = null;
+
 const SYS = `Ти безпековий класифікатор. Відповідай тільки JSON українською.
 Не додавай нові факти.
 Якщо є координати, адреси, маршрути, курс/вектор, прогноз часу (через N хв) => safe=false.
 short_ua: 1-2 рядки, без точних локацій, координат, прогнозів.
-Поверни: {"category":"official_notice|unverified_report|other","safe":true,"confidence":0,"short_ua":"","reasons":[""]}`;
+Поверни: {"category":"official_notice|uav_shahed|unverified_report|other","safe":true,"confidence":0,"short_ua":"","reasons":[""]}`;
+
+export function getLlmStatus() {
+  return {
+    enabled: Boolean(config.llm.apiKey),
+    reason: config.llm.apiKey ? (lastLlmError || 'OK') : 'LLM_API_KEY не заданий',
+  };
+}
 
 export async function analyzeWithLLM(input, logger) {
   const hardUnsafe = hasUnsafe(input);
@@ -37,6 +46,7 @@ export async function analyzeWithLLM(input, logger) {
     if (!r.ok) throw new Error(`LLM HTTP ${r.status}`);
     const data = await r.json();
     const out = JSON.parse(data.choices?.[0]?.message?.content || '{}');
+    lastLlmError = null;
     return {
       category: out.category || fallback.category,
       safe: Boolean(out.safe) && !hardUnsafe,
@@ -45,6 +55,7 @@ export async function analyzeWithLLM(input, logger) {
       reasons: Array.isArray(out.reasons) ? out.reasons : fallback.reasons,
     };
   } catch (e) {
+    lastLlmError = e.message;
     logger.warn({ err: e.message }, 'LLM недоступний, fallback');
     return fallback;
   }

@@ -1,6 +1,6 @@
 # Siverbot 24/7
 
-Бот з офіційним polling тривог (джерело A), MTProto-читачем каналів, адмін-керуванням через Telegraf, чергою модерації та LLM-аналізом.
+Бот з офіційним polling тривог (джерело A) + MTProto-канали (джерело B), автопостом 24/7 для trusted джерел та safety-first фільтром.
 
 ## Встановлення
 1. Скопіюйте `.env.example` -> `.env`.
@@ -8,26 +8,26 @@
 3. `npm install`
 4. `npm start`
 
-## TG_SESSION для MTProto
-1. Створіть окремий тимчасовий скрипт на GramJS з `StringSession`.
-2. Пройдіть логін другим акаунтом Telegram.
-3. Збережіть рядок сесії у `TG_SESSION`.
-
-## Ключові команди (owner)
+## Команди owner
 - `/duty on|off`
 - `/mode night|day|manual`
 - `/status`
-- `/mtproto` (стан підключення + причина)
-- `/queue` (+ кнопки approve/reject)
-- `/sources`, `/source_add`, `/source_on <id>`, `/source_off <id>`
+- `/mtproto`
+- `/focus [shahed|all]`
+- `/antispam status`
+- `/queue` (+ approve/reject)
+- `/sources`, `/source_add`, `/source_set_level <id> A|B|C`, `/source_on <id>`, `/source_off <id>`
 - `/health`, `/settings`, `/set <key> <value>`
 
-## Режими
-- `manual`: автопублікації вимкнено.
-- `night`: автопублікація лише офіційних тривог.
-- `day`: офіційні тривоги + непідтверджені тільки при 2 незалежних джерелах, якщо увімкнено `autopost_unverified_day=true`.
+## Логіка автопосту
+- `duty_enabled=true` + mode `night/day`: автопост для trusted джерел (A/B), якщо SafetyFilter+anti-spam пройдені.
+- `manual` або `duty_enabled=false`: без автопосту, події у чергу.
+- Черга використовується переважно для safety-blocked або коли безпечно узагальнити не вдалось.
 
-## Безпека
-- Жорсткий фільтр блокує координати/адреси/маршрути/прогнози часу.
-- Якщо небезпечно — автопублікація заборонена, подія йде в чергу.
-- LLM є primary шляхом аналізу; без ключа або при помилці — fallback на rule-based.
+## FOCUS_MODE
+- `shahed` (default): обробляються лише повідомлення з ключами `шахед|shahed|бпла|дрон|uav|мопед`.
+- `all`: обробляються всі категорії, але safety правила незмінні.
+
+## Safety та антиспам
+- Заборонені координати/адреси/маршрути/прогнози часу — такі події не автопостяться.
+- Dedup (default 20 хв), per-source cooldown (120с), global rate limit (3 пости / 5 хв).

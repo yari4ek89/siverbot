@@ -14,7 +14,7 @@ async function main() {
   let pipeline;
   const mtproto = getMtprotoClient({ db, logger, onEvent: async (event) => pipeline.ingest(event) });
   const admin = new AdminBot({ config, db, getSetting, setSetting, pipeline: { approve: (...a) => pipeline.approve(...a), reject: (...a) => pipeline.reject(...a) }, mtproto, logger });
-  pipeline = new Pipeline({ db, getSetting, bot: admin.bot, logger });
+  pipeline = new Pipeline({ db, getSetting, setSetting, bot: admin.bot, logger });
 
   const alerts = new AlertsPoller({ onEvent: async (event) => pipeline.ingest(event), logger, getSetting });
 
