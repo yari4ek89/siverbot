@@ -5,10 +5,11 @@ import { StateStore } from './stateStore.js';
 import { normalizeText } from './normalize.js';
 import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
-import { analyzeMessage } from './analyzer.js';
+import { analyzeMessage, detectRegionsFromRaw, detectThreatFromRaw } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
 import { postEvent } from './poster.js';
 import { getLlmStatus, listModels } from './llmGemini.js';
+import { getSourceProfile } from './sourceProfile.js';
 
 const logger = createLogger(config.logLevel);
 const bot = new Telegraf(config.botToken);
@@ -230,7 +231,39 @@ bot.command('postlast', async (ctx) => {
     logger,
   });
 
-  await ctx.reply(formatAnalysis(analysis));
+  const detectedRegionsFromRaw = detectRegionsFromRaw(text);
+  const detectedThreatFromRaw = detectThreatFromRaw(text);
+  const sourceProfile = getSourceProfile(first, config);
+
+  await ctx.reply([
+    formatAnalysis(analysis),
+    `detectedRegionsFromRaw=${detectedRegionsFromRaw.join(',')}`,
+    `detectedThreatFromRaw=${detectedThreatFromRaw}`,
+    `sourceProfile=${JSON.stringify(sourceProfile)}`,
+  ].join('\n'));
+});
+
+bot.command('selfcheck', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+
+  const sample = 'Тепер локаційно лише залишилось 2 БпЛа. 1 в районі Бахмача ... 1 в районі Путивля ...';
+  const sampleSource = config.uavOnlySources[0] || config.sourceChannels[0];
+
+  const analysis = await analyzeMessage({
+    text: sample,
+    sourceName: sampleSource,
+    regions: config.regions,
+    config,
+    logger,
+  });
+
+  await ctx.reply([
+    `sampleSource=${sampleSource}`,
+    formatAnalysis(analysis),
+    `detectedRegionsFromRaw=${detectRegionsFromRaw(sample).join(',')}`,
+    `detectedThreatFromRaw=${detectThreatFromRaw(sample)}`,
+    `sourceProfile=${JSON.stringify(getSourceProfile(sampleSource, config))}`,
+  ].join('\n'));
 });
 
 bot.command('postlast_force', async (ctx) => {
