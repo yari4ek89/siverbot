@@ -8,19 +8,18 @@ const emojiByThreat = {
 
 function regionLabel(regionHits = []) {
   const hits = new Set(regionHits);
-  if (hits.has('both')) return 'Обидва';
-  if (hits.has('chernihiv') && hits.has('sumy')) return 'Обидва';
+  if (hits.has('both')) return 'Чернігівщина + Сумщина';
+  if (hits.has('chernihiv') && hits.has('sumy')) return 'Чернігівщина + Сумщина';
   if (hits.has('chernihiv')) return 'Чернігівщина';
   if (hits.has('sumy')) return 'Сумщина';
   return 'Невідомо';
 }
 
-export async function postEvent({ bot, targetChatId, event, testTag = '' }) {
-  const { analysis, sources } = event;
+export async function postEvent({ bot, targetChatId, event }) {
+  const { analysis } = event;
   const emoji = emojiByThreat[analysis.threatType] || emojiByThreat.unknown;
-  const title = `${testTag}${analysis.title}`.trim();
 
-  const text = `${emoji} ${title}\n${analysis.summary}\nРегіон: ${regionLabel(analysis.regionHits)}\nДжерела: ${sources.join(', ')}`;
+  const text = `${emoji} ${analysis.title}\n${analysis.summary}\nРегіон: ${regionLabel(analysis.regionHits)}`;
 
   await bot.telegram.sendMessage(targetChatId, text, {
     disable_web_page_preview: true,

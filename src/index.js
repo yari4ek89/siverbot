@@ -8,6 +8,7 @@ import { ChannelFetcher } from './channelFetcher.js';
 import { analyzeMessage } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
 import { postEvent } from './poster.js';
+import { getLlmStatus } from './llmGemini.js';
 
 const logger = createLogger(config.logLevel);
 const bot = new Telegraf(config.botToken);
@@ -35,6 +36,18 @@ let isTickRunning = false;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
+}
+
+function formatAnalysis(analysis) {
+  return [
+    `should_post=${analysis.shouldPost}`,
+    `regions=${analysis.regionHits.join(',')}`,
+    `threat_type=${analysis.threatType}`,
+    `confidence=${analysis.confidence}`,
+    `title=${analysis.title}`,
+    `summary=${analysis.summary}`,
+    `reason=${analysis.reason}`,
+  ].join('\n');
 }
 
 async function initGramIfPossible() {
@@ -129,6 +142,8 @@ bot.command('ping', async (ctx) => {
 
 bot.command('debug', async (ctx) => {
   if (!isAdmin(ctx)) return;
+  const llm = getLlmStatus();
+
   await ctx.reply([
     `admin=${config.adminUserId}`,
     `here_chat=${ctx.chat?.id}`,
@@ -138,18 +153,24 @@ bot.command('debug', async (ctx) => {
     `gramjs enabled=${gram.enabled}`,
     `gramjs initialized=${gram.initialized}`,
     `lastInitError=${gram.lastInitError || 'none'}`,
+    `llm enabled=${llm.enabled}`,
+    `llm lastError=${llm.lastError || 'none'}`,
+    `llm lastCallAt=${llm.lastCallAt || 'never'}`,
   ].join('\n'));
 });
 
 bot.command('sources', async (ctx) => {
   if (!isAdmin(ctx)) return;
+  const llm = getLlmStatus();
   const rows = config.sourceChannels.map((ch) => `${ch}: lastMsgId=${stateStore.getLastMsgId(ch)}`);
   await ctx.reply([
     `enabled=${gram.enabled} initialized=${gram.initialized}`,
-    `channels=${config.sourceChannels.join(', ')}`,
+    `parsedChannels=${config.sourceChannels.join(', ')}`,
+    `invalidChannels=${config.invalidSourceChannels.length ? config.invalidSourceChannels.join(', ') : 'none'}`,
     ...rows,
     `lastTick=${lastTickStats ? JSON.stringify({ fetchedTotal: lastTickStats.fetchedTotal, newTotal: lastTickStats.newTotal, posted: lastTickStats.posted, at: lastTickStats.at }) : 'none'}`,
     `lastInitError=${gram.lastInitError || 'none'}`,
+    `llmStatus=${JSON.stringify(llm)}`,
   ].join('\n'));
 });
 
@@ -183,18 +204,35 @@ bot.command('postlast', async (ctx) => {
     logger,
   });
 
-  if (!analysis.shouldPost) {
-    return ctx.reply(`Not posted. reason=${analysis.reason}\nsummary=${analysis.summary}`);
-  }
+  await ctx.reply(formatAnalysis(analysis));
+});
+
+bot.command('postlast_force', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  if (!gram.initialized) return ctx.reply('GramJS is not initialized');
+
+  const first = config.sourceChannels[0];
+  const messages = await gram.client.getMessages(first, { limit: 1 });
+  const msg = messages?.[0];
+  const text = msg?.message?.trim();
+
+  if (!text) return ctx.reply('No text in last message');
+
+  const analysis = await analyzeMessage({
+    text,
+    sourceName: first,
+    regions: config.regions,
+    config,
+    logger,
+  });
 
   await postEvent({
     bot,
     targetChatId: config.targetChatId,
     event: { analysis, sources: [first], text },
-    testTag: '[TEST] ',
   });
 
-  await ctx.reply('Posted test message to target chat');
+  await ctx.reply(`Forced post sent.\n${formatAnalysis(analysis)}`);
 });
 
 await initGramIfPossible();

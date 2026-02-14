@@ -8,7 +8,6 @@ const required = [
   'TG_API_HASH',
   'TG_SESSION_STRING',
   'SOURCE_CHANNELS',
-  'GEMINI_API_KEY',
 ];
 
 function getRequired(name) {
@@ -24,6 +23,14 @@ if (!Number.isFinite(tgApiId)) {
   throw new Error(`TG_API_ID must be a number, got: ${process.env.TG_API_ID}`);
 }
 
+const sourceChannelsRaw = getRequired('SOURCE_CHANNELS').split(',').map((s) => s.trim()).filter(Boolean);
+const invalidSourceChannels = sourceChannelsRaw.filter((ch) => !ch.startsWith('@'));
+const sourceChannels = sourceChannelsRaw.filter((ch) => ch.startsWith('@'));
+
+if (sourceChannels.length === 0) {
+  throw new Error('SOURCE_CHANNELS must include at least one valid channel starting with @');
+}
+
 export const config = {
   botToken: getRequired('BOT_TOKEN'),
   targetChatId: getRequired('TARGET_CHAT_ID'),
@@ -31,10 +38,12 @@ export const config = {
   tgApiId,
   tgApiHash: getRequired('TG_API_HASH'),
   tgSessionString: getRequired('TG_SESSION_STRING'),
-  sourceChannels: getRequired('SOURCE_CHANNELS').split(',').map((s) => s.trim()).filter(Boolean),
+  sourceChannelsRaw,
+  sourceChannels,
+  invalidSourceChannels,
   fetchIntervalSec: Number(process.env.FETCH_INTERVAL_SEC ?? 15),
   fetchLimit: Number(process.env.FETCH_LIMIT ?? 20),
-  geminiApiKey: getRequired('GEMINI_API_KEY'),
+  geminiApiKey: (process.env.GEMINI_API_KEY || '').trim(),
   geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 12000),
   regions: (process.env.REGIONS || 'chernihiv,sumy').split(',').map((x) => x.trim().toLowerCase()),
