@@ -28,7 +28,12 @@ const confirmer = new Confirmer({
 let gram = { enabled: true, initialized: false, client: null, fetcher: null, lastInitError: null };
 let lastTickStats = null;
 let lastTickAt = null;
+let lastTickError = null;
+let lastPostedAt = null;
+let lastPostError = null;
 let isTickRunning = false;
+let schedulerStarted = false;
+let schedulerTimer = null;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
@@ -115,7 +120,18 @@ async function initGramIfPossible() {
 }
 
 async function handleApprovedPost(analysis, eventKey) {
-  await postEvent({ bot, targetChatId: config.targetChatId, event: { analysis, sources: [] } });
+  await postEvent({
+    bot,
+    targetChatId: config.targetChatId,
+    event: { analysis, sources: [] },
+    onSuccess: () => {
+      lastPostedAt = new Date().toISOString();
+      lastPostError = null;
+    },
+    onError: (err) => {
+      lastPostError = shortError(err);
+    },
+  });
   stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
 }
 
@@ -192,20 +208,42 @@ async function processItems(items) {
   return { analyzed, posted };
 }
 
-async function runTick() {
-  if (!gram.initialized || isTickRunning) return;
-  isTickRunning = true;
+async function tickOnce() {
+  if (!gram.initialized || isTickRunning) {
+    lastTickAt = new Date().toISOString();
+    return;
+  }
 
+  isTickRunning = true;
   try {
     const tick = await gram.fetcher.tick();
     const processed = await processItems(tick.items);
-    lastTickAt = new Date().toISOString();
-    lastTickStats = { ...tick, analyzed: processed.analyzed, posted: processed.posted, at: lastTickAt };
+    lastTickStats = { ...tick, analyzed: processed.analyzed, posted: processed.posted, at: new Date().toISOString() };
+    lastTickError = null;
   } catch (error) {
+    lastTickError = shortError(error?.message || error);
     logger.error('Tick failed:', error?.message || error);
   } finally {
+    lastTickAt = new Date().toISOString();
     isTickRunning = false;
   }
+}
+
+function startScheduler() {
+  if (schedulerStarted) return;
+  schedulerStarted = true;
+
+  tickOnce().catch((error) => {
+    lastTickError = shortError(error?.message || error);
+    logger.error('tickOnce immediate run error:', error?.message || error);
+  });
+
+  schedulerTimer = setInterval(() => {
+    tickOnce().catch((error) => {
+      lastTickError = shortError(error?.message || error);
+      logger.error('tickOnce interval error:', error?.message || error);
+    });
+  }, Math.max(5, config.fetchIntervalSec) * 1000);
 }
 
 bot.command('ping', async (ctx) => { if (!isAdmin(ctx)) return; await ctx.reply('pong'); });
@@ -262,6 +300,9 @@ bot.command('debug', async (ctx) => {
     `llmLastError=${shortError(stateStore.getLlmLastError())}`,
     `llmActiveModel=${llm.activeModel || 'none'}`,
     `lastTickAt=${lastTickAt || 'never'}`,
+    `lastTickError=${shortError(lastTickError)}`,
+    `lastPostedAt=${lastPostedAt || 'never'}`,
+    `lastPostError=${shortError(lastPostError)}`,
     ...msgRows,
   ].join('\n'));
 });
@@ -287,6 +328,10 @@ bot.command('sources', async (ctx) => {
   await ctx.reply([
     `enabled=${gram.enabled} initialized=${gram.initialized}`,
     ...rows,
+    `lastTickAt=${lastTickAt || 'never'}`,
+    `lastTickError=${shortError(lastTickError)}`,
+    `lastPostedAt=${lastPostedAt || 'never'}`,
+    `lastPostError=${shortError(lastPostError)}`,
     `lastTick=${lastTickStats ? JSON.stringify({ fetchedTotal: lastTickStats.fetchedTotal, newTotal: lastTickStats.newTotal, posted: lastTickStats.posted, at: lastTickStats.at }) : 'none'}`,
     `mode=${stateStore.getPostingMode()}`,
     `llmMode=${stateStore.getLlmMode()}`,
@@ -301,6 +346,7 @@ bot.command('pull', async (ctx) => {
   const tick = await gram.fetcher.tick();
   const processed = await processItems(tick.items);
   lastTickAt = new Date().toISOString();
+  lastTickError = null;
   lastTickStats = { ...tick, ...processed, at: lastTickAt };
 
   const pullDebug = Object.entries(tick.perChannelStats || {})
@@ -358,17 +404,20 @@ bot.command('postlast_force', async (ctx) => {
   const text = msg?.message?.trim();
   if (!text) return ctx.reply('No text in last message');
   const analysis = await analyzeMessage({ text, sourceName: first, regions: config.regions, config, logger, llmContext: getLlmContext() });
-  await postEvent({ bot, targetChatId: config.targetChatId, event: { analysis, sources: [first], text } });
+  await handleApprovedPost(analysis, buildEventKey(analysis));
   await ctx.reply(`Forced post sent.\n${formatAnalysis(analysis)}`);
 });
 
 await initGramIfPossible();
 await bot.launch();
 logger.info('Bot started');
+startScheduler();
 
-setInterval(() => {
-  runTick().catch((error) => logger.error('runTick interval error:', error?.message || error));
-}, Math.max(5, config.fetchIntervalSec) * 1000);
-
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  if (schedulerTimer) clearInterval(schedulerTimer);
+  bot.stop('SIGINT');
+});
+process.once('SIGTERM', () => {
+  if (schedulerTimer) clearInterval(schedulerTimer);
+  bot.stop('SIGTERM');
+});

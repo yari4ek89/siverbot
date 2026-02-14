@@ -46,8 +46,16 @@ export function buildPreviewText(analysis, opts = {}) {
   return sanitizeOutput(`${line1}\n${line2}`);
 }
 
-export async function postEvent({ bot, targetChatId, event }) {
+export async function postEvent({ bot, targetChatId, event, onSuccess, onError }) {
   const { analysis } = event;
   const text = buildPreviewText(analysis, { isUpdate: analysis.isUpdate });
-  await bot.telegram.sendMessage(targetChatId, text, { disable_web_page_preview: true });
+
+  try {
+    await bot.telegram.sendMessage(targetChatId, text, { disable_web_page_preview: true });
+    if (typeof onSuccess === 'function') onSuccess();
+  } catch (error) {
+    const description = error?.response?.description || error?.description || error?.message || String(error);
+    if (typeof onError === 'function') onError(description);
+    throw error;
+  }
 }
