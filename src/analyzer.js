@@ -31,6 +31,18 @@ function normalizeLocationLabel(loc) {
   return sanitizeOutput(loc).replace(/^\p{L}/u, (x) => x.toUpperCase());
 }
 
+function extractCountFromRaw(rawText, threatType) {
+  const norm = normalizeText(rawText);
+  const matches = norm.match(/\b\d{1,3}\b/g) || [];
+  if (!matches.length) return null;
+  const number = Number(matches[0]);
+  if (!Number.isFinite(number) || number <= 0) return null;
+
+  if (threatType === 'uav' && /(бпла|дрон|шахед|shahed)/i.test(norm)) return number;
+  if (threatType === 'missile' && /(ракет|крылат|крилат|баліст|баллист)/i.test(norm)) return number;
+  return null;
+}
+
 function detectRegionStringFromRaw(rawText) {
   const rawNorm = normalizeText(rawText);
   const hitsC = CHERNIHIV_PATTERNS.some((p) => rawNorm.includes(p));
@@ -57,6 +69,14 @@ export function detectThreatFromRaw(rawText) {
   if (KEYWORDS.aviation.some((k) => rawNorm.includes(k))) return 'aviation';
   if (KEYWORDS.air_defense.some((k) => rawNorm.includes(k))) return 'air_defense';
   return 'unknown';
+}
+
+export function buildEventKey(analyzed) {
+  const threat = normalizeText(analyzed.threat_type || analyzed.threatType || 'unknown');
+  const region = normalizeText(analyzed.regions || analyzed.regionHits?.[0] || 'none');
+  const locations = dedupeLimit((analyzed.locations || []).map((x) => normalizeText(x))).sort().join('-') || 'noloc';
+  const countPart = Number.isFinite(Number(analyzed.count)) ? String(Number(analyzed.count)) : 'nocount';
+  return `${threat}|${region}|${locations}|${countPart}`;
 }
 
 function extractLocationsFromRaw(rawText) {
@@ -130,9 +150,9 @@ function finalizeResult(result) {
   result.reason = sanitizeOutput(result.reason || '');
   result.locations = dedupeLimit((result.locations || []).map((x) => sanitizeOutput(x)), 3);
   result.directions = dedupeLimit((result.directions || []).map((x) => sanitizeOutput(x)), 3);
+  result.count = Number.isFinite(Number(result.count)) ? Number(result.count) : null;
   result.language = 'uk';
 
-  // backward-compatible aliases
   result.shouldPost = result.should_post;
   result.regionHits = toRegionHits(result.regions);
   result.threatType = result.threat_type;
@@ -163,6 +183,7 @@ function buildFallbackResult({ rawText, sourceName, config, llmError }) {
     reason: `LLM error: ${shortError(llmError || 'недоступний')}`,
     locations,
     directions,
+    count: extractCountFromRaw(rawText, detectedThreat),
   });
 }
 
@@ -214,10 +235,13 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
       reason: parsed.reason || 'Класифікація виконана LLM',
       locations,
       directions,
+      count: extractCountFromRaw(rawText, parsed.threat_type || 'unknown'),
     };
 
     if (detectedRegion !== 'none') result.regions = detectedRegion;
     if (detectedThreat !== 'unknown') result.threat_type = detectedThreat;
+
+    result.count = extractCountFromRaw(rawText, result.threat_type);
 
     return finalizeResult(result);
   } catch (error) {

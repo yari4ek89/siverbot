@@ -4,6 +4,10 @@ import path from 'node:path';
 const defaultState = {
   lastMsgIdByChannel: {},
   dedup: {},
+  eventDedup: {},
+  postingMode: 'auto',
+  pendingQueue: {},
+  nextPendingId: 1,
 };
 
 export class StateStore {
@@ -25,6 +29,8 @@ export class StateStore {
         ...parsed,
         lastMsgIdByChannel: parsed.lastMsgIdByChannel || {},
         dedup: parsed.dedup || {},
+        eventDedup: parsed.eventDedup || {},
+        pendingQueue: parsed.pendingQueue || {},
       };
     } catch {
       this.state = structuredClone(defaultState);
@@ -58,15 +64,74 @@ export class StateStore {
     this.saveState();
   }
 
+  isEventDedup(eventKey) {
+    this.cleanupDedup();
+    return Boolean(this.state.eventDedup[eventKey]);
+  }
+
+  putEventDedup(eventKey, ttlMin) {
+    this.state.eventDedup[eventKey] = Date.now() + ttlMin * 60 * 1000;
+    this.saveState();
+  }
+
   cleanupDedup() {
     const now = Date.now();
     let changed = false;
+
     for (const [k, exp] of Object.entries(this.state.dedup)) {
       if (!exp || exp <= now) {
         delete this.state.dedup[k];
         changed = true;
       }
     }
+
+    for (const [k, exp] of Object.entries(this.state.eventDedup)) {
+      if (!exp || exp <= now) {
+        delete this.state.eventDedup[k];
+        changed = true;
+      }
+    }
+
     if (changed) this.saveState();
+  }
+
+  getPostingMode() {
+    const mode = this.state.postingMode;
+    return ['auto', 'manual', 'off'].includes(mode) ? mode : 'auto';
+  }
+
+  setPostingMode(mode) {
+    if (!['auto', 'manual', 'off'].includes(mode)) return false;
+    this.state.postingMode = mode;
+    this.saveState();
+    return true;
+  }
+
+  listPending() {
+    return Object.values(this.state.pendingQueue);
+  }
+
+  getPending(id) {
+    return this.state.pendingQueue[id] || null;
+  }
+
+  addPending(payload) {
+    const id = String(this.state.nextPendingId++);
+    this.state.pendingQueue[id] = {
+      id,
+      ...payload,
+      createdAt: new Date().toISOString(),
+    };
+    this.saveState();
+    return this.state.pendingQueue[id];
+  }
+
+  removePending(id) {
+    const existing = this.state.pendingQueue[id] || null;
+    if (existing) {
+      delete this.state.pendingQueue[id];
+      this.saveState();
+    }
+    return existing;
   }
 }

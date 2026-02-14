@@ -5,7 +5,7 @@ import { StateStore } from './stateStore.js';
 import { normalizeText } from './normalize.js';
 import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
-import { analyzeMessage, detectRegionsFromRaw, detectThreatFromRaw } from './analyzer.js';
+import { analyzeMessage, detectRegionsFromRaw, detectThreatFromRaw, buildEventKey } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
 import { postEvent, buildPreviewText } from './poster.js';
 import { getLlmStatus, listModels } from './llmGemini.js';
@@ -44,15 +44,25 @@ function shortError(message, limit = 200) {
   return String(message).replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
+function getEventTtlMin(threatType) {
+  if (threatType === 'uav') return 20;
+  if (threatType === 'missile') return 10;
+  if (threatType === 'air_defense') return 15;
+  return config.dedupTtlMin;
+}
+
 function formatAnalysis(analysis) {
   return [
-    `should_post=${analysis.shouldPost}`,
-    `regions=${analysis.regionHits.join(',')}`,
-    `threat_type=${analysis.threatType}`,
+    `should_post=${analysis.should_post ?? analysis.shouldPost}`,
+    `regions=${analysis.regions ?? analysis.regionHits?.join(',')}`,
+    `threat_type=${analysis.threat_type ?? analysis.threatType}`,
     `confidence=${analysis.confidence}`,
     `title=${analysis.title}`,
     `summary=${analysis.summary}`,
     `reason=${analysis.reason}`,
+    `count=${analysis.count ?? 'none'}`,
+    `locations=${(analysis.locations || []).join(', ') || 'none'}`,
+    `directions=${(analysis.directions || []).join(', ') || 'none'}`,
   ].join('\n');
 }
 
@@ -72,6 +82,46 @@ async function initGramIfPossible() {
     gram.lastInitError = error?.message || String(error);
     logger.error('GramJS init failed:', gram.lastInitError);
   }
+}
+
+async function handleApprovedPost(analysis, eventKey) {
+  await postEvent({
+    bot,
+    targetChatId: config.targetChatId,
+    event: { analysis, sources: [] },
+  });
+  stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
+}
+
+async function handleByMode(analysis, eventKey) {
+  const mode = stateStore.getPostingMode();
+  const previewText = buildPreviewText(analysis);
+
+  if (mode === 'off') {
+    logger.info('Posting skipped (mode=off)', { eventKey, previewText });
+    stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
+    return { posted: false, mode, pendingId: null };
+  }
+
+  if (mode === 'manual') {
+    const pending = stateStore.addPending({
+      eventKey,
+      analysis,
+      previewText,
+    });
+    stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
+
+    await bot.telegram.sendMessage(
+      config.adminUserId,
+      `Потрібне підтвердження #${pending.id}\n${previewText}\n\n/approve ${pending.id} або /reject ${pending.id}`,
+      { disable_web_page_preview: true },
+    );
+
+    return { posted: false, mode, pendingId: pending.id };
+  }
+
+  await handleApprovedPost(analysis, eventKey);
+  return { posted: true, mode, pendingId: null };
 }
 
 async function processItems(items) {
@@ -101,13 +151,16 @@ async function processItems(items) {
 
     if (!confirmation.readyToPost) continue;
 
-    await postEvent({
-      bot,
-      targetChatId: config.targetChatId,
-      event: confirmation,
-    });
+    const eventKey = buildEventKey(confirmation.analysis);
+    if (stateStore.isEventDedup(eventKey)) {
+      logger.info('Event dedup hit, skip', { eventKey });
+      continue;
+    }
+
+    const modeResult = await handleByMode(confirmation.analysis, eventKey);
+    if (modeResult.posted) posted += 1;
+
     stateStore.putDedup(dedupKey, config.dedupTtlMin);
-    posted += 1;
   }
 
   return { analyzed, posted };
@@ -133,6 +186,7 @@ async function runTick() {
       newTotal: tick.newTotal,
       analyzed: processed.analyzed,
       posted: processed.posted,
+      postingMode: stateStore.getPostingMode(),
     });
   } catch (error) {
     logger.error('Tick failed:', error?.message || error);
@@ -144,6 +198,45 @@ async function runTick() {
 bot.command('ping', async (ctx) => {
   if (!isAdmin(ctx)) return;
   await ctx.reply('pong');
+});
+
+bot.command('mode', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const text = ctx.message?.text || '';
+  const parts = text.split(/\s+/).filter(Boolean);
+
+  if (parts.length === 1) {
+    return ctx.reply(`mode=${stateStore.getPostingMode()}`);
+  }
+
+  const targetMode = (parts[1] || '').toLowerCase();
+  const ok = stateStore.setPostingMode(targetMode);
+  if (!ok) return ctx.reply('Невірний режим. Використай: /mode auto | manual | off');
+
+  await ctx.reply(`mode=${stateStore.getPostingMode()}`);
+});
+
+bot.command('approve', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const id = (ctx.message?.text || '').split(/\s+/)[1];
+  if (!id) return ctx.reply('Вкажи id: /approve <id>');
+
+  const pending = stateStore.getPending(id);
+  if (!pending) return ctx.reply(`pending ${id} не знайдено`);
+
+  await handleApprovedPost(pending.analysis, pending.eventKey);
+  stateStore.removePending(id);
+  await ctx.reply(`Публікацію ${id} відправлено.`);
+});
+
+bot.command('reject', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  const id = (ctx.message?.text || '').split(/\s+/)[1];
+  if (!id) return ctx.reply('Вкажи id: /reject <id>');
+
+  const removed = stateStore.removePending(id);
+  if (!removed) return ctx.reply(`pending ${id} не знайдено`);
+  await ctx.reply(`Публікацію ${id} відхилено.`);
 });
 
 bot.command('debug', async (ctx) => {
@@ -163,6 +256,8 @@ bot.command('debug', async (ctx) => {
     `llmActiveModel=${llm.activeModel || 'none'}`,
     `llmLastError=${shortError(llm.lastError)}`,
     `llmLastCallAt=${llm.lastCallAt || 'never'}`,
+    `postingMode=${stateStore.getPostingMode()}`,
+    `pendingCount=${stateStore.listPending().length}`,
   ].join('\n'));
 });
 
@@ -197,6 +292,8 @@ bot.command('sources', async (ctx) => {
     ...rows,
     `lastTick=${lastTickStats ? JSON.stringify({ fetchedTotal: lastTickStats.fetchedTotal, newTotal: lastTickStats.newTotal, posted: lastTickStats.posted, at: lastTickStats.at }) : 'none'}`,
     `lastInitError=${gram.lastInitError || 'none'}`,
+    `mode=${stateStore.getPostingMode()}`,
+    `pending=${stateStore.listPending().length}`,
     `llmStatus=${JSON.stringify({ enabled: Boolean(config.geminiApiKey), activeModel: llm.activeModel, lastError: shortError(llm.lastError), lastCallAt: llm.lastCallAt })}`,
   ].join('\n'));
 });
@@ -242,6 +339,7 @@ bot.command('postlast', async (ctx) => {
     `detectedRegionsFromRaw=${detectedRegionsFromRaw.join(',')}`,
     `detectedThreatFromRaw=${detectedThreatFromRaw}`,
     `sourceProfile=${JSON.stringify(sourceProfile)}`,
+    `eventKey=${buildEventKey(analysis)}`,
     `previewText=${previewText}`,
   ].join('\n'));
 });
@@ -266,6 +364,7 @@ bot.command('selfcheck', async (ctx) => {
     `detectedRegionsFromRaw=${detectRegionsFromRaw(sample).join(',')}`,
     `detectedThreatFromRaw=${detectThreatFromRaw(sample)}`,
     `sourceProfile=${JSON.stringify(getSourceProfile(sampleSource, config))}`,
+    `eventKey=${buildEventKey(analysis)}`,
     `previewText=${buildPreviewText(analysis)}`,
   ].join('\n'));
 });
