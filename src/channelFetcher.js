@@ -1,3 +1,15 @@
+function toISODate(msg) {
+  const d = msg?.date;
+  if (!d) return new Date().toISOString();
+  if (d instanceof Date) return d.toISOString();
+  if (typeof d === 'number') return new Date(d * 1000).toISOString();
+  if (typeof d === 'string') {
+    const t = Date.parse(d);
+    if (!Number.isNaN(t)) return new Date(t).toISOString();
+  }
+  return new Date().toISOString();
+}
+
 export class ChannelFetcher {
   constructor(client, channels, limit, stateStore, logger) {
     this.client = client;
@@ -39,17 +51,24 @@ export class ChannelFetcher {
         const newMsgs = sortedLatest.filter((m) => m?.id && m.id > lastIdBefore);
 
         for (const msg of newMsgs) {
-          const text = msg.message?.trim();
-          if (!text || text.length < 15) continue;
+          try {
+            const text = msg.message?.trim();
+            if (!text || text.length < 15) continue;
 
-          items.push({
-            sourceName: channel,
-            sourceId: String(msg.peerId?.channelId ?? channel),
-            msgId: msg.id,
-            dateISO: msg.date ? msg.date.toISOString() : new Date().toISOString(),
-            text,
-          });
-          perChannelStats[channel].new += 1;
+            items.push({
+              sourceName: channel,
+              sourceId: String(msg.peerId?.channelId ?? channel),
+              msgId: msg.id,
+              dateISO: toISODate(msg),
+              text,
+            });
+            perChannelStats[channel].new += 1;
+          } catch (error) {
+            this.logger?.warn(
+              `Message mapping failed for ${channel} msgId=${msg?.id} dateType=${typeof msg?.date}:`,
+              error?.message || error,
+            );
+          }
         }
 
         if (maxId && maxId > lastIdBefore) {
