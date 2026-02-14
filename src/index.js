@@ -7,7 +7,7 @@ import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
 import { analyzeMessage, detectRegionsFromRaw, detectThreatFromRaw } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
-import { postEvent } from './poster.js';
+import { postEvent, buildPreviewText } from './poster.js';
 import { getLlmStatus, listModels } from './llmGemini.js';
 import { getSourceProfile } from './sourceProfile.js';
 
@@ -235,11 +235,14 @@ bot.command('postlast', async (ctx) => {
   const detectedThreatFromRaw = detectThreatFromRaw(text);
   const sourceProfile = getSourceProfile(first, config);
 
+  const previewText = buildPreviewText(analysis);
+
   await ctx.reply([
     formatAnalysis(analysis),
     `detectedRegionsFromRaw=${detectedRegionsFromRaw.join(',')}`,
     `detectedThreatFromRaw=${detectedThreatFromRaw}`,
     `sourceProfile=${JSON.stringify(sourceProfile)}`,
+    `previewText=${previewText}`,
   ].join('\n'));
 });
 
@@ -263,6 +266,7 @@ bot.command('selfcheck', async (ctx) => {
     `detectedRegionsFromRaw=${detectRegionsFromRaw(sample).join(',')}`,
     `detectedThreatFromRaw=${detectThreatFromRaw(sample)}`,
     `sourceProfile=${JSON.stringify(getSourceProfile(sampleSource, config))}`,
+    `previewText=${buildPreviewText(analysis)}`,
   ].join('\n'));
 });
 

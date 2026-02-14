@@ -13,15 +13,22 @@ const CHERNIHIV_PATTERNS = ['черніг', 'черниг', 'чернігівщ'
 const SUMY_PATTERNS = ['сум', 'сумщ', 'сумська', 'суми', 'конотоп', 'шостк', 'охтирк', 'глухів', 'ромн', 'путивл', 'вакалівщина', 'вакаливщина', 'vakalyvshchyna', 'vakalivshchyna'];
 
 const KNOWN_LOCATIONS = [
-  'вакалівщина', 'вакаливщина', 'vakalyvshchyna', 'vakalivshchyna',
-  'ніжин', 'нежин', 'прилуки', 'прилук', 'бахмач', 'корюківка', 'корюків', 'новгород-сіверський', 'новгород сівер',
-  'суми', 'сумська область', 'конотоп', 'шостка', 'охтирка', 'глухів', 'ромни', 'путивль', 'путивля', 'тростянець',
-  'чернігів', 'чернігівщина', 'чернигов',
+  'вакалівщина', 'вакаливщина', 'ніжин', 'прилуки', 'бахмач', 'корюківка', 'новгород-сіверський',
+  'суми', 'сумська область', 'конотоп', 'шостка', 'охтирка', 'глухів', 'ромни', 'путивль', 'тростянець',
+  'чернігів', 'чернігівщина',
 ];
 
 function shortError(message, limit = 200) {
   if (!message) return 'невідома помилка';
   return sanitizeOutput(String(message).replace(/\s+/g, ' ').trim().slice(0, limit));
+}
+
+function dedupeLimit(arr, limit = 3) {
+  return [...new Set(arr.filter(Boolean))].slice(0, limit);
+}
+
+function normalizeLocationLabel(loc) {
+  return sanitizeOutput(loc).replace(/^\p{L}/u, (x) => x.toUpperCase());
 }
 
 function detectRegionStringFromRaw(rawText) {
@@ -36,7 +43,11 @@ function detectRegionStringFromRaw(rawText) {
 }
 
 export function detectRegionsFromRaw(rawText) {
-  return toRegionHits(detectRegionStringFromRaw(rawText));
+  const region = detectRegionStringFromRaw(rawText);
+  if (region === 'both') return ['both'];
+  if (region === 'chernihiv') return ['chernihiv'];
+  if (region === 'sumy') return ['sumy'];
+  return ['none'];
 }
 
 export function detectThreatFromRaw(rawText) {
@@ -48,12 +59,34 @@ export function detectThreatFromRaw(rawText) {
   return 'unknown';
 }
 
-function toRegionString(value) {
-  if (Array.isArray(value)) {
-    const first = value[0];
-    return typeof first === 'string' ? first : 'none';
+function extractLocationsFromRaw(rawText) {
+  const rawNorm = normalizeText(rawText);
+  const found = [];
+  for (const loc of KNOWN_LOCATIONS) {
+    if (rawNorm.includes(loc)) found.push(normalizeLocationLabel(loc));
   }
-  return typeof value === 'string' ? value : 'none';
+  return dedupeLimit(found, 3);
+}
+
+function extractDirectionsFromRaw(rawText) {
+  const patterns = [
+    /\bв\s+бік\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+    /\bкурс\s+на\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+    /\bнапрямок\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+  ];
+  const out = [];
+  for (const re of patterns) {
+    for (const m of rawText.match(re) || []) {
+      out.push(sanitizeOutput(m).replace(/\.$/, '').trim());
+    }
+  }
+  return dedupeLimit(out, 3);
+}
+
+function toRegionString(value) {
+  if (Array.isArray(value) && value.length) return String(value[0]);
+  if (typeof value === 'string') return value;
+  return 'none';
 }
 
 function toRegionHits(region) {
@@ -63,69 +96,16 @@ function toRegionHits(region) {
   return ['none'];
 }
 
-function regionLabel(region) {
-  if (region === 'both') return 'Чернігівщина + Сумщина';
-  if (region === 'chernihiv') return 'Чернігівщина';
-  if (region === 'sumy') return 'Сумщина';
-  return 'Регіон не визначено';
-}
-
 function titleByThreat(threatType, region) {
-  const regionText = regionLabel(region);
+  const regionText = region === 'both' ? 'Чернігівщині й Сумщині' : region === 'chernihiv' ? 'Чернігівщині' : region === 'sumy' ? 'Сумщині' : 'регіону';
   const map = {
-    uav: `БПЛА: ${regionText}`,
-    missile: `Ракетна небезпека: ${regionText}`,
-    aviation: `Авіаційна загроза: ${regionText}`,
-    air_defense: `Повітряна небезпека: ${regionText}`,
-    unknown: `Повітряна загроза: ${regionText}`,
+    uav: `Є БПЛА по ${regionText}.`,
+    missile: `Ракетна небезпека по ${regionText}.`,
+    aviation: `Авіаційна активність по ${regionText}.`,
+    air_defense: `Робота ППО по ${regionText}.`,
+    unknown: `Є повітряна загроза по ${regionText}.`,
   };
   return map[threatType] || map.unknown;
-}
-
-function extractDirectionPhrases(rawText) {
-  const out = [];
-  const patterns = [
-    /\bв\s+бік\s+[\p{L}\p{N}\-\s]{2,40}/giu,
-    /\bкурс\s+на\s+[\p{L}\p{N}\-\s]{2,40}/giu,
-    /\bнапрямок\s+[\p{L}\p{N}\-\s]{2,40}/giu,
-  ];
-
-  for (const re of patterns) {
-    const matches = rawText.match(re) || [];
-    for (const m of matches) {
-      const clean = sanitizeOutput(m).slice(0, 60).trim();
-      if (clean && !out.includes(clean)) out.push(clean);
-      if (out.length >= 3) return out;
-    }
-  }
-  return out;
-}
-
-function extractLocationsFromRaw(rawText) {
-  const rawNorm = normalizeText(rawText);
-  const found = [];
-  for (const loc of KNOWN_LOCATIONS) {
-    if (rawNorm.includes(loc) && !found.includes(loc)) found.push(loc);
-    if (found.length >= 3) break;
-  }
-  return found;
-}
-
-function buildSummaryFromRaw({ threatType, region, rawText }) {
-  const threatLabel = {
-    uav: 'БПЛА',
-    missile: 'ракетну небезпеку',
-    aviation: 'авіаційну загрозу',
-    air_defense: 'повітряну небезпеку',
-    unknown: 'повітряну небезпеку',
-  }[threatType] || 'повітряну небезпеку';
-
-  const locations = extractLocationsFromRaw(rawText);
-  const directions = extractDirectionPhrases(rawText);
-
-  const locText = locations.length ? ` Локації з тексту: ${locations.join(', ')}.` : '';
-  const dirText = directions.length ? ` Напрямки з тексту: ${directions.join('; ')}.` : '';
-  return `Зафіксовано повідомлення про ${threatLabel} у межах регіону ${regionLabel(region)}.${locText}${dirText}`;
 }
 
 function clampConfidence(value) {
@@ -137,7 +117,6 @@ function clampConfidence(value) {
 function finalizeResult(result) {
   result.regions = toRegionString(result.regions);
   result.threat_type = result.threat_type || 'unknown';
-  result.confidence = clampConfidence(result.confidence);
 
   if (result.regions && result.regions !== 'none' && result.threat_type && result.threat_type !== 'unknown') {
     result.should_post = true;
@@ -145,12 +124,15 @@ function finalizeResult(result) {
     result.should_post = false;
   }
 
+  result.confidence = clampConfidence(result.confidence);
   result.title = sanitizeOutput(result.title || '');
   result.summary = sanitizeOutput(result.summary || '');
   result.reason = sanitizeOutput(result.reason || '');
+  result.locations = dedupeLimit((result.locations || []).map((x) => sanitizeOutput(x)), 3);
+  result.directions = dedupeLimit((result.directions || []).map((x) => sanitizeOutput(x)), 3);
   result.language = 'uk';
 
-  // compatibility fields for existing code
+  // backward-compatible aliases
   result.shouldPost = result.should_post;
   result.regionHits = toRegionHits(result.regions);
   result.threatType = result.threat_type;
@@ -162,33 +144,33 @@ function buildFallbackResult({ rawText, sourceName, config, llmError }) {
   const profile = getSourceProfile(sourceName, config);
   const detectedRegion = detectRegionStringFromRaw(rawText);
   let detectedThreat = detectThreatFromRaw(rawText);
+  const locations = extractLocationsFromRaw(rawText);
+  const directions = extractDirectionsFromRaw(rawText);
 
   if (detectedThreat === 'unknown' && profile.allowLocationOnly && detectedRegion !== 'none') {
     detectedThreat = profile.defaultThreatType;
   }
 
-  const locationOnly = detectThreatFromRaw(rawText) === 'unknown' && profile.allowLocationOnly && detectedRegion !== 'none';
-
-  const result = {
+  return finalizeResult({
     should_post: false,
     regions: detectedRegion,
     threat_type: detectedThreat,
-    confidence: locationOnly ? 0.65 : 0.5,
+    confidence: profile.allowLocationOnly && detectedRegion !== 'none' ? 0.65 : 0.5,
     title: titleByThreat(detectedThreat, detectedRegion),
-    summary: buildSummaryFromRaw({ threatType: detectedThreat, region: detectedRegion, rawText }),
-    reason: locationOnly
-      ? 'Локація з профільного радара інтерпретована як повітряна загроза.'
-      : `LLM error: ${shortError(llmError || 'недоступний')}`,
-  };
-
-  return finalizeResult(result);
+    summary: locations.length
+      ? `Локації: ${locations.join(', ')}.`
+      : 'Деталей по локаціях поки немає.',
+    reason: `LLM error: ${shortError(llmError || 'недоступний')}`,
+    locations,
+    directions,
+  });
 }
 
 export async function analyzeMessage({ text, sourceName, regions, config, logger }) {
   const rawText = text || '';
   const profile = getSourceProfile(sourceName, config);
 
-  const prompt = `Ти класифікатор OSINT-повідомлень про повітряні загрози. Поверни СУВОРО JSON за схемою:
+  const prompt = `Ти класифікатор повідомлень про повітряні загрози. Поверни СУВОРО JSON:
 {
   "should_post": boolean,
   "regions": ["chernihiv"|"sumy"|"both"|"none"],
@@ -199,17 +181,14 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
   "reason": string
 }
 Правила:
-- Пиши українською.
-- Публікувати лише повітряні загрози для Чернігівщини та/або Сумщини.
-- Якщо згадана лише одна область, вкажи тільки її, не "both".
+- Пиши українською, коротко і по-людськи.
 - НЕ згадуй джерела/канали/@юзернейми.
-- Локації/напрямки можна згадувати ТІЛЬКИ якщо вони є в оригінальному тексті. Не додавати нічого від себе.
+- Локації/напрямки можна згадувати тільки якщо вони є в оригінальному тексті.
+- Без координат, без прогнозів, без трактувань.
 - Джерело: ${sourceName}. Профіль: defaultThreatType=${profile.defaultThreatType}, allowLocationOnly=${profile.allowLocationOnly}.
-- Якщо джерело не профільне, не припускай загрозу лише по локації.
-- Заборонено координати, цілі, прогнози часу/ударів.
 - Якщо невпевнено, should_post=false.
 Дозволені регіони: ${regions.join(',')}
-Текст повідомлення:\n${rawText}`;
+Текст:\n${rawText}`;
 
   try {
     const parsed = await analyzeWithGemini({
@@ -222,6 +201,8 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
 
     const detectedRegion = detectRegionStringFromRaw(rawText);
     const detectedThreat = detectThreatFromRaw(rawText);
+    const locations = extractLocationsFromRaw(rawText);
+    const directions = extractDirectionsFromRaw(rawText);
 
     const result = {
       should_post: Boolean(parsed.should_post),
@@ -229,16 +210,14 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
       threat_type: parsed.threat_type || 'unknown',
       confidence: Number(parsed.confidence ?? 0),
       title: parsed.title || titleByThreat(parsed.threat_type || 'unknown', toRegionString(parsed.regions)),
-      summary: parsed.summary || buildSummaryFromRaw({ threatType: parsed.threat_type || 'unknown', region: toRegionString(parsed.regions), rawText }),
+      summary: parsed.summary || (locations.length ? `Локації: ${locations.join(', ')}.` : 'Деталей по локаціях поки немає.'),
       reason: parsed.reason || 'Класифікація виконана LLM',
+      locations,
+      directions,
     };
 
-    if (detectedRegion !== 'none') {
-      result.regions = detectedRegion;
-    }
-    if (detectedThreat !== 'unknown') {
-      result.threat_type = detectedThreat;
-    }
+    if (detectedRegion !== 'none') result.regions = detectedRegion;
+    if (detectedThreat !== 'unknown') result.threat_type = detectedThreat;
 
     return finalizeResult(result);
   } catch (error) {
