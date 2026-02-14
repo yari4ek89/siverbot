@@ -6,7 +6,6 @@ import { normalizeText, sanitizeOutput } from './normalize.js';
 import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
 import { analyzeMessage } from './analyzer.js';
-import { Confirmer } from './confirmer.js';
 import { postEvent, buildPreviewText } from './poster.js';
 import { getLlmStatus, listModels } from './llmGemini.js';
 import { getSourceProfile } from './sourceProfile.js';
@@ -17,13 +16,6 @@ const stateStore = new StateStore(config.stateFile);
 stateStore.loadState();
 if (!stateStore.getLlmMode()) stateStore.setLlmMode(config.llmMode || 'off');
 
-const confirmer = new Confirmer({
-  confirmWindowMin: config.confirmWindowMin,
-  minSourcesDay: config.minSourcesDay,
-  minSourcesNight: config.minSourcesNight,
-  dayStart: config.dayStart,
-  dayEnd: config.dayEnd,
-});
 
 const gramStatus = {
   enabled: true,
@@ -128,6 +120,13 @@ async function initGramIfPossible() {
 }
 
 async function handleApprovedPost(analysis, eventKey) {
+  if (!config.targetChatId) {
+    gramStatus.lastPostAt = new Date().toISOString();
+    gramStatus.lastPostOk = false;
+    gramStatus.lastPostError = 'targetChatId missing';
+    throw new Error('targetChatId missing');
+  }
+
   await postEvent({
     bot,
     targetChatId: config.targetChatId,
@@ -160,15 +159,38 @@ async function handleByMode(analysis, eventKey) {
     stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
     await bot.telegram.sendMessage(
       config.adminUserId,
-      `Потрібне підтвердження #${pending.id}\n${previewText}\n\n/approve ${pending.id} або /reject ${pending.id}`,
+      `Потрібне підтвердження #${pending.id}
+${previewText}
+
+/approve ${pending.id} або /reject ${pending.id}`,
       { disable_web_page_preview: true },
     );
     return { posted: false, decision: 'skip: mode=manual' };
   }
 
-  await handleApprovedPost(analysis, eventKey);
-  return { posted: true, decision: 'post' };
+  console.log('[PIPE] posting attempt', { target: config.targetChatId });
+  if (!config.targetChatId) {
+    gramStatus.lastPostAt = new Date().toISOString();
+    gramStatus.lastPostOk = false;
+    gramStatus.lastPostError = 'targetChatId missing';
+    return { posted: false, decision: 'skip: targetChatId missing' };
+  }
+
+  try {
+    await bot.telegram.sendMessage(config.targetChatId, previewText, { disable_web_page_preview: true });
+    gramStatus.lastPostAt = new Date().toISOString();
+    gramStatus.lastPostOk = true;
+    gramStatus.lastPostError = 'none';
+    stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
+    return { posted: true, decision: 'post' };
+  } catch (e) {
+    gramStatus.lastPostAt = new Date().toISOString();
+    gramStatus.lastPostOk = false;
+    gramStatus.lastPostError = shortError(e?.response?.description || e?.message || String(e));
+    return { posted: false, decision: 'error: post failed' };
+  }
 }
+
 
 async function processItems(items) {
   let analyzed = 0;
@@ -188,13 +210,21 @@ async function processItems(items) {
       llmContext: getLlmContext(),
     });
 
+    const previewText = buildPreviewText(analysis);
     const shouldPost = Boolean(analysis.should_post ?? analysis.shouldPost);
-    if (!shouldPost) continue;
+    const decision = shouldPost ? 'post' : 'skip: should_post=false';
+    console.log('[PIPE] analyzed', {
+      should_post: shouldPost,
+      decision,
+      previewLen: (previewText || '').length,
+    });
 
-    const confirmation = confirmer.add({ text: item.text, sourceName: item.sourceName, analysis });
-    if (!confirmation.readyToPost) continue;
+    if (!shouldPost) {
+      stateStore.putDedup(dedupKey, config.dedupTtlMin);
+      continue;
+    }
 
-    let finalAnalysis = { ...confirmation.analysis };
+    let finalAnalysis = { ...analysis };
     const baseKey = buildBaseEventKey(finalAnalysis);
     const prevMeta = stateStore.getEventBaseMeta(baseKey);
     if (isUpdateCompared(prevMeta, finalAnalysis)) {
@@ -202,16 +232,12 @@ async function processItems(items) {
     }
 
     const eventKey = buildEventKey(finalAnalysis);
-    if (stateStore.isEventDedup(eventKey)) continue;
-
-    try {
-      const modeResult = await handleByMode(finalAnalysis, eventKey);
-      if (modeResult.posted) posted += 1;
-    } catch (error) {
-      gramStatus.lastPostOk = false;
-      gramStatus.lastPostError = shortError(error?.message || error?.response?.description || error);
-      logger.error('Posting failed:', gramStatus.lastPostError);
+    if (stateStore.isEventDedup(eventKey)) {
+      stateStore.putDedup(dedupKey, config.dedupTtlMin);
+      continue;
     }
+
+    const modeResult = await handleByMode(finalAnalysis, eventKey);
 
     stateStore.putEventBaseMeta(
       baseKey,
@@ -219,11 +245,14 @@ async function processItems(items) {
       getEventTtlMin(finalAnalysis.threat_type || finalAnalysis.threatType),
     );
 
+    if (modeResult.posted) posted += 1;
+
     stateStore.putDedup(dedupKey, config.dedupTtlMin);
   }
 
   return { analyzed, posted };
 }
+
 
 async function tickOnce(reason = 'interval') {
   gramStatus.lastTickAt = new Date().toISOString();
@@ -412,8 +441,10 @@ bot.command('pull', async (ctx) => {
   const lines = [
     `pull done: fetched=${stats.fetchedTotal}, new=${stats.newTotal}, analyzed=${stats.analyzed}, posted=${stats.posted}`,
     pullDebug || 'no per-channel stats',
+    `lastPostAt=${gramStatus.lastPostAt || 'never'}`,
+    `lastPostOk=${gramStatus.lastPostOk === null ? 'none' : String(gramStatus.lastPostOk)}`,
+    `lastPostError=${shortError(gramStatus.lastPostError)}`,
   ];
-  if (stats.posted === 0) lines.push(`lastPostError=${shortError(gramStatus.lastPostError)}`);
   await ctx.reply(lines.join('\n'));
 });
 
