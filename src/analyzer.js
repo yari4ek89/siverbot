@@ -1,4 +1,4 @@
-import { analyzeWithGemini } from './llmGemini.js';
+import { analyzeWithGemini, getLlmStatus } from './llmGemini.js';
 import { normalizeText } from './normalize.js';
 
 const KEYWORDS = {
@@ -10,6 +10,11 @@ const KEYWORDS = {
 
 const CHERNIHIV_PATTERNS = ['черніг', 'черниг', 'чернігівщ', 'черниговск', 'ніжин', 'нежин', 'прилук', 'бахмач', 'корюків', 'новгород-сівер', 'сіверщина'];
 const SUMY_PATTERNS = ['сум', 'сумщ', 'сумська', 'суми', 'конотоп', 'шостк', 'охтирк', 'глухів', 'ромн'];
+
+function shortError(message, limit = 200) {
+  if (!message) return 'unknown';
+  return String(message).replace(/\s+/g, ' ').trim().slice(0, limit);
+}
 
 function detectRegions(textNorm) {
   const hitsC = CHERNIHIV_PATTERNS.some((p) => textNorm.includes(p));
@@ -75,7 +80,7 @@ function fallback(text, llmError = null) {
     summary: shouldPost
       ? summaryByThreat(threatType, regionHits)
       : 'Повідомлення не відповідає фільтру повітряної небезпеки для Чернігівщини/Сумщини.',
-    reason: llmError ? `Fallback used: ${llmError}` : 'Fallback used: LLM unavailable',
+    reason: `LLM error: ${shortError(llmError || 'unavailable')}`,
     language: 'uk',
   };
 }
@@ -126,6 +131,8 @@ Message:\n${text}`;
       language: 'uk',
     };
   } catch (error) {
-    return fallback(text, error?.message || null);
+    const llm = getLlmStatus();
+    const modelInfo = llm.lastTriedModel ? ` (model=${llm.lastTriedModel})` : '';
+    return fallback(text, `${error?.message || 'unknown'}${modelInfo}`);
   }
 }

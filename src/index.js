@@ -8,7 +8,7 @@ import { ChannelFetcher } from './channelFetcher.js';
 import { analyzeMessage } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
 import { postEvent } from './poster.js';
-import { getLlmStatus } from './llmGemini.js';
+import { getLlmStatus, listModels } from './llmGemini.js';
 
 const logger = createLogger(config.logLevel);
 const bot = new Telegraf(config.botToken);
@@ -36,6 +36,11 @@ let isTickRunning = false;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
+}
+
+function shortError(message, limit = 200) {
+  if (!message) return 'none';
+  return String(message).replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
 function formatAnalysis(analysis) {
@@ -153,9 +158,22 @@ bot.command('debug', async (ctx) => {
     `gramjs enabled=${gram.enabled}`,
     `gramjs initialized=${gram.initialized}`,
     `lastInitError=${gram.lastInitError || 'none'}`,
-    `llm enabled=${llm.enabled}`,
-    `llm lastError=${llm.lastError || 'none'}`,
-    `llm lastCallAt=${llm.lastCallAt || 'never'}`,
+    `llmEnabled=${Boolean(config.geminiApiKey)}`,
+    `llmActiveModel=${llm.activeModel || 'none'}`,
+    `llmLastError=${shortError(llm.lastError)}`,
+    `llmLastCallAt=${llm.lastCallAt || 'never'}`,
+  ].join('\n'));
+});
+
+bot.command('models', async (ctx) => {
+  if (!isAdmin(ctx)) return;
+  await listModels({ apiKey: config.geminiApiKey, logger });
+  const llm = getLlmStatus();
+
+  await ctx.reply([
+    `activeModel=${llm.activeModel || 'none'}`,
+    `last10Models=${llm.lastModels.length ? llm.lastModels.join(', ') : 'none'}`,
+    `lastLlmError=${shortError(llm.lastError)}`,
   ].join('\n'));
 });
 
@@ -170,7 +188,7 @@ bot.command('sources', async (ctx) => {
     ...rows,
     `lastTick=${lastTickStats ? JSON.stringify({ fetchedTotal: lastTickStats.fetchedTotal, newTotal: lastTickStats.newTotal, posted: lastTickStats.posted, at: lastTickStats.at }) : 'none'}`,
     `lastInitError=${gram.lastInitError || 'none'}`,
-    `llmStatus=${JSON.stringify(llm)}`,
+    `llmStatus=${JSON.stringify({ enabled: Boolean(config.geminiApiKey), activeModel: llm.activeModel, lastError: shortError(llm.lastError), lastCallAt: llm.lastCallAt })}`,
   ].join('\n'));
 });
 
