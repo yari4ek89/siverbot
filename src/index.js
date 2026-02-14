@@ -6,6 +6,7 @@ import { ChannelFetcher } from './channelFetcher.js';
 const bot = new Telegraf(config.botToken);
 
 let channelFetcher = null;
+let isLaunched = false;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
@@ -23,7 +24,13 @@ async function postIncomingText(text, sourceName = null) {
 }
 
 bot.use(async (ctx, next) => {
+  console.log('HANDLER_MIDDLEWARE');
+
   if (!ctx.from) return;
+
+  if (ctx.message?.text?.startsWith('/')) {
+    return next();
+  }
 
   if (!isAdmin(ctx)) {
     console.log(`IGNORE from=${ctx.from.id} chat=${ctx.chat?.id ?? 'n/a'}`);
@@ -34,20 +41,48 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start((ctx) => {
+  console.log('HANDLER_START');
+
+  if (!isAdmin(ctx)) {
+    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    return;
+  }
+
   ctx.reply('Готово. Я принимаю сообщения только от админа.');
 });
 
 bot.command('ping', (ctx) => {
+  console.log('HANDLER_COMMAND ping');
+
+  if (!isAdmin(ctx)) {
+    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    return;
+  }
+
   ctx.reply('pong');
 });
 
 bot.command('debug', (ctx) => {
+  console.log('HANDLER_COMMAND debug');
+
+  if (!isAdmin(ctx)) {
+    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    return;
+  }
+
   ctx.reply(
     `admin=${config.adminUserId} | here_chat=${ctx.chat.id} | target=${config.targetChatId} | from=${ctx.from.id}`
   );
 });
 
 bot.command('sources', (ctx) => {
+  console.log('HANDLER_COMMAND sources');
+
+  if (!isAdmin(ctx)) {
+    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    return;
+  }
+
   if (!channelFetcher) {
     return ctx.reply('Source fetcher ще не ініціалізовано');
   }
@@ -90,8 +125,13 @@ async function pollChannels() {
   }
 }
 
-console.log('START');
-bot.launch().then(async () => {
+async function main() {
+  if (isLaunched) return;
+  isLaunched = true;
+
+  console.log('START');
+  await bot.launch();
+
   const gramClient = await createClient();
   channelFetcher = new ChannelFetcher(gramClient, config.sourceChannels, config.fetchLimit);
 
@@ -99,7 +139,9 @@ bot.launch().then(async () => {
   setInterval(() => {
     void pollChannels();
   }, 15_000);
-});
+}
+
+void main();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
