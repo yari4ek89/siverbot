@@ -25,15 +25,23 @@ const confirmer = new Confirmer({
   dayEnd: config.dayEnd,
 });
 
-let gram = { enabled: true, initialized: false, client: null, fetcher: null, lastInitError: null };
-let lastTickStats = null;
-let lastTickAt = null;
-let lastTickError = null;
-let lastPostedAt = null;
-let lastPostError = null;
-let isTickRunning = false;
-let schedulerStarted = false;
-let schedulerTimer = null;
+const gramStatus = {
+  enabled: true,
+  initialized: false,
+  client: null,
+  fetcher: null,
+  lastInitError: null,
+  lastTickStats: null,
+  lastTickAt: null,
+  lastTickReason: null,
+  lastTickError: 'none',
+  isTickRunning: false,
+  schedulerStarted: false,
+  schedulerTimer: null,
+  lastPostAt: null,
+  lastPostOk: null,
+  lastPostError: 'none',
+};
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
@@ -107,15 +115,15 @@ function getLlmContext() {
 
 async function initGramIfPossible() {
   try {
-    gram.client = await createGramClient({ apiId: config.tgApiId, apiHash: config.tgApiHash, sessionString: config.tgSessionString });
-    gram.fetcher = new ChannelFetcher(gram.client, config.sourceChannels, config.fetchLimit, stateStore, logger);
-    gram.initialized = true;
-    gram.lastInitError = null;
+    gramStatus.client = await createGramClient({ apiId: config.tgApiId, apiHash: config.tgApiHash, sessionString: config.tgSessionString });
+    gramStatus.fetcher = new ChannelFetcher(gramStatus.client, config.sourceChannels, config.fetchLimit, stateStore, logger);
+    gramStatus.initialized = true;
+    gramStatus.lastInitError = null;
     logger.info('GramJS initialized successfully');
   } catch (error) {
-    gram.initialized = false;
-    gram.lastInitError = error?.message || String(error);
-    logger.error('GramJS init failed:', gram.lastInitError);
+    gramStatus.initialized = false;
+    gramStatus.lastInitError = error?.message || String(error);
+    logger.error('GramJS init failed:', gramStatus.lastInitError);
   }
 }
 
@@ -125,11 +133,13 @@ async function handleApprovedPost(analysis, eventKey) {
     targetChatId: config.targetChatId,
     event: { analysis, sources: [] },
     onSuccess: () => {
-      lastPostedAt = new Date().toISOString();
-      lastPostError = null;
+      gramStatus.lastPostAt = new Date().toISOString();
+      gramStatus.lastPostOk = true;
+      gramStatus.lastPostError = 'none';
     },
     onError: (err) => {
-      lastPostError = shortError(err);
+      gramStatus.lastPostOk = false;
+      gramStatus.lastPostError = shortError(err);
     },
   });
   stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
@@ -142,7 +152,7 @@ async function handleByMode(analysis, eventKey) {
   if (mode === 'off') {
     logger.info('Posting skipped (mode=off)', { eventKey, previewText });
     stateStore.putEventDedup(eventKey, getEventTtlMin(analysis.threat_type || analysis.threatType));
-    return { posted: false };
+    return { posted: false, decision: 'skip: mode=off' };
   }
 
   if (mode === 'manual') {
@@ -153,11 +163,11 @@ async function handleByMode(analysis, eventKey) {
       `Потрібне підтвердження #${pending.id}\n${previewText}\n\n/approve ${pending.id} або /reject ${pending.id}`,
       { disable_web_page_preview: true },
     );
-    return { posted: false };
+    return { posted: false, decision: 'skip: mode=manual' };
   }
 
   await handleApprovedPost(analysis, eventKey);
-  return { posted: true };
+  return { posted: true, decision: 'post' };
 }
 
 async function processItems(items) {
@@ -178,7 +188,8 @@ async function processItems(items) {
       llmContext: getLlmContext(),
     });
 
-    if (!analysis.shouldPost) continue;
+    const shouldPost = Boolean(analysis.should_post ?? analysis.shouldPost);
+    if (!shouldPost) continue;
 
     const confirmation = confirmer.add({ text: item.text, sourceName: item.sourceName, analysis });
     if (!confirmation.readyToPost) continue;
@@ -193,8 +204,14 @@ async function processItems(items) {
     const eventKey = buildEventKey(finalAnalysis);
     if (stateStore.isEventDedup(eventKey)) continue;
 
-    const modeResult = await handleByMode(finalAnalysis, eventKey);
-    if (modeResult.posted) posted += 1;
+    try {
+      const modeResult = await handleByMode(finalAnalysis, eventKey);
+      if (modeResult.posted) posted += 1;
+    } catch (error) {
+      gramStatus.lastPostOk = false;
+      gramStatus.lastPostError = shortError(error?.message || error?.response?.description || error);
+      logger.error('Posting failed:', gramStatus.lastPostError);
+    }
 
     stateStore.putEventBaseMeta(
       baseKey,
@@ -208,39 +225,76 @@ async function processItems(items) {
   return { analyzed, posted };
 }
 
-async function tickOnce() {
-  if (!gram.initialized || isTickRunning) {
-    lastTickAt = new Date().toISOString();
-    return;
+async function tickOnce(reason = 'interval') {
+  gramStatus.lastTickAt = new Date().toISOString();
+  gramStatus.lastTickReason = reason;
+
+  if (!gramStatus.initialized) {
+    gramStatus.lastTickError = 'GramJS is not initialized';
+    return {
+      fetchedTotal: 0,
+      newTotal: 0,
+      analyzed: 0,
+      posted: 0,
+      perChannelStats: {},
+      reason,
+      at: gramStatus.lastTickAt,
+    };
   }
 
-  isTickRunning = true;
+  if (gramStatus.isTickRunning) {
+    return gramStatus.lastTickStats || {
+      fetchedTotal: 0,
+      newTotal: 0,
+      analyzed: 0,
+      posted: 0,
+      perChannelStats: {},
+      reason,
+      at: gramStatus.lastTickAt,
+    };
+  }
+
+  gramStatus.isTickRunning = true;
   try {
-    const tick = await gram.fetcher.tick();
+    const tick = await gramStatus.fetcher.tick();
     const processed = await processItems(tick.items);
-    lastTickStats = { ...tick, analyzed: processed.analyzed, posted: processed.posted, at: new Date().toISOString() };
-    lastTickError = null;
+    gramStatus.lastTickError = 'none';
+    gramStatus.lastTickStats = {
+      ...tick,
+      analyzed: processed.analyzed,
+      posted: processed.posted,
+      reason,
+      at: new Date().toISOString(),
+    };
+    return gramStatus.lastTickStats;
   } catch (error) {
-    lastTickError = shortError(error?.message || error);
+    gramStatus.lastTickError = shortError(error?.message || error);
     logger.error('Tick failed:', error?.message || error);
+    gramStatus.lastTickStats = {
+      fetchedTotal: 0,
+      newTotal: 0,
+      analyzed: 0,
+      posted: 0,
+      perChannelStats: {},
+      reason,
+      at: new Date().toISOString(),
+    };
+    return gramStatus.lastTickStats;
   } finally {
-    lastTickAt = new Date().toISOString();
-    isTickRunning = false;
+    gramStatus.lastTickAt = new Date().toISOString();
+    gramStatus.isTickRunning = false;
   }
 }
 
-function startScheduler() {
-  if (schedulerStarted) return;
-  schedulerStarted = true;
+async function startScheduler() {
+  if (gramStatus.schedulerStarted) return;
+  gramStatus.schedulerStarted = true;
 
-  tickOnce().catch((error) => {
-    lastTickError = shortError(error?.message || error);
-    logger.error('tickOnce immediate run error:', error?.message || error);
-  });
+  await tickOnce('boot');
 
-  schedulerTimer = setInterval(() => {
-    tickOnce().catch((error) => {
-      lastTickError = shortError(error?.message || error);
+  gramStatus.schedulerTimer = setInterval(() => {
+    tickOnce('interval').catch((error) => {
+      gramStatus.lastTickError = shortError(error?.message || error);
       logger.error('tickOnce interval error:', error?.message || error);
     });
   }, Math.max(5, config.fetchIntervalSec) * 1000);
@@ -299,10 +353,12 @@ bot.command('debug', async (ctx) => {
     `llmCooldownUntil=${stateStore.getLlmCooldownUntil() || 0}`,
     `llmLastError=${shortError(stateStore.getLlmLastError())}`,
     `llmActiveModel=${llm.activeModel || 'none'}`,
-    `lastTickAt=${lastTickAt || 'never'}`,
-    `lastTickError=${shortError(lastTickError)}`,
-    `lastPostedAt=${lastPostedAt || 'never'}`,
-    `lastPostError=${shortError(lastPostError)}`,
+    `lastTickAt=${gramStatus.lastTickAt || 'never'}`,
+    `lastTickReason=${gramStatus.lastTickReason || 'none'}`,
+    `lastTickError=${shortError(gramStatus.lastTickError)}`,
+    `lastPostAt=${gramStatus.lastPostAt || 'never'}`,
+    `lastPostOk=${gramStatus.lastPostOk === null ? 'none' : String(gramStatus.lastPostOk)}`,
+    `lastPostError=${shortError(gramStatus.lastPostError)}`,
     ...msgRows,
   ].join('\n'));
 });
@@ -311,7 +367,11 @@ bot.command('models', async (ctx) => {
   if (!isAdmin(ctx)) return;
   await listModels({ apiKey: config.geminiApiKey, logger });
   const llm = getLlmStatus();
-  await ctx.reply([`activeModel=${llm.activeModel || 'none'}`, `last10Models=${llm.lastModels.length ? llm.lastModels.join(', ') : 'none'}`, `lastLlmError=${shortError(llm.lastError)}`].join('\n'));
+  await ctx.reply([
+    `activeModel=${llm.activeModel || 'none'}`,
+    `last10Models=${llm.lastModels.length ? llm.lastModels.join(', ') : 'none'}`,
+    `lastLlmError=${shortError(llm.lastError)}`,
+  ].join('\n'));
 });
 
 bot.command('profiles', async (ctx) => {
@@ -326,13 +386,15 @@ bot.command('sources', async (ctx) => {
   if (!isAdmin(ctx)) return;
   const rows = config.sourceChannels.map((ch) => `${ch}: lastMsgId=${stateStore.getLastMsgId(ch)}`);
   await ctx.reply([
-    `enabled=${gram.enabled} initialized=${gram.initialized}`,
+    `enabled=${gramStatus.enabled} initialized=${gramStatus.initialized}`,
     ...rows,
-    `lastTickAt=${lastTickAt || 'never'}`,
-    `lastTickError=${shortError(lastTickError)}`,
-    `lastPostedAt=${lastPostedAt || 'never'}`,
-    `lastPostError=${shortError(lastPostError)}`,
-    `lastTick=${lastTickStats ? JSON.stringify({ fetchedTotal: lastTickStats.fetchedTotal, newTotal: lastTickStats.newTotal, posted: lastTickStats.posted, at: lastTickStats.at }) : 'none'}`,
+    `lastTickAt=${gramStatus.lastTickAt || 'never'}`,
+    `lastTickReason=${gramStatus.lastTickReason || 'none'}`,
+    `lastTickError=${shortError(gramStatus.lastTickError)}`,
+    `lastPostAt=${gramStatus.lastPostAt || 'never'}`,
+    `lastPostOk=${gramStatus.lastPostOk === null ? 'none' : String(gramStatus.lastPostOk)}`,
+    `lastPostError=${shortError(gramStatus.lastPostError)}`,
+    `lastTick=${gramStatus.lastTickStats ? JSON.stringify({ fetchedTotal: gramStatus.lastTickStats.fetchedTotal, newTotal: gramStatus.lastTickStats.newTotal, posted: gramStatus.lastTickStats.posted, at: gramStatus.lastTickStats.at, reason: gramStatus.lastTickStats.reason }) : 'none'}`,
     `mode=${stateStore.getPostingMode()}`,
     `llmMode=${stateStore.getLlmMode()}`,
     `pending=${stateStore.listPending().length}`,
@@ -341,37 +403,34 @@ bot.command('sources', async (ctx) => {
 
 bot.command('pull', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  if (!gram.initialized) return ctx.reply('GramJS is not initialized');
+  const stats = await tickOnce('pull');
 
-  const tick = await gram.fetcher.tick();
-  const processed = await processItems(tick.items);
-  lastTickAt = new Date().toISOString();
-  lastTickError = null;
-  lastTickStats = { ...tick, ...processed, at: lastTickAt };
-
-  const pullDebug = Object.entries(tick.perChannelStats || {})
+  const pullDebug = Object.entries(stats.perChannelStats || {})
     .map(([ch, st]) => `${ch}: lastIdBefore=${st.lastIdBefore}, maxIdFetched=${st.maxIdFetched}, newCount=${st.new}`)
     .join('\n');
 
-  await ctx.reply([
-    `pull done: fetched=${tick.fetchedTotal}, new=${tick.newTotal}, analyzed=${processed.analyzed}, posted=${processed.posted}`,
+  const lines = [
+    `pull done: fetched=${stats.fetchedTotal}, new=${stats.newTotal}, analyzed=${stats.analyzed}, posted=${stats.posted}`,
     pullDebug || 'no per-channel stats',
-  ].join('\n'));
+  ];
+  if (stats.posted === 0) lines.push(`lastPostError=${shortError(gramStatus.lastPostError)}`);
+  await ctx.reply(lines.join('\n'));
 });
 
 bot.command('postlast', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  if (!gram.initialized) return ctx.reply('GramJS is not initialized');
+  if (!gramStatus.initialized) return ctx.reply('GramJS is not initialized');
 
   const first = config.sourceChannels[0];
-  const messages = await gram.client.getMessages(first, { limit: 1 });
+  const messages = await gramStatus.client.getMessages(first, { limit: 1 });
   const msg = messages?.[0];
   const text = msg?.message?.trim();
   if (!text) return ctx.reply('No text in last message');
 
   const analysis = await analyzeMessage({ text, sourceName: first, regions: config.regions, config, logger, llmContext: getLlmContext() });
   const eventKey = buildEventKey(analysis);
-  const skipReason = stateStore.isEventDedup(eventKey) ? 'skip: event dedup TTL' : (analysis.shouldPost ? 'post' : 'skip: should_post=false');
+  const shouldPost = Boolean(analysis.should_post ?? analysis.shouldPost);
+  const skipReason = stateStore.isEventDedup(eventKey) ? 'skip: event dedup TTL' : (shouldPost ? 'post' : 'skip: should_post=false');
 
   await ctx.reply([
     formatAnalysis(analysis),
@@ -397,9 +456,9 @@ bot.command('selfcheck', async (ctx) => {
 
 bot.command('postlast_force', async (ctx) => {
   if (!isAdmin(ctx)) return;
-  if (!gram.initialized) return ctx.reply('GramJS is not initialized');
+  if (!gramStatus.initialized) return ctx.reply('GramJS is not initialized');
   const first = config.sourceChannels[0];
-  const messages = await gram.client.getMessages(first, { limit: 1 });
+  const messages = await gramStatus.client.getMessages(first, { limit: 1 });
   const msg = messages?.[0];
   const text = msg?.message?.trim();
   if (!text) return ctx.reply('No text in last message');
@@ -411,13 +470,13 @@ bot.command('postlast_force', async (ctx) => {
 await initGramIfPossible();
 await bot.launch();
 logger.info('Bot started');
-startScheduler();
+await startScheduler();
 
 process.once('SIGINT', () => {
-  if (schedulerTimer) clearInterval(schedulerTimer);
+  if (gramStatus.schedulerTimer) clearInterval(gramStatus.schedulerTimer);
   bot.stop('SIGINT');
 });
 process.once('SIGTERM', () => {
-  if (schedulerTimer) clearInterval(schedulerTimer);
+  if (gramStatus.schedulerTimer) clearInterval(gramStatus.schedulerTimer);
   bot.stop('SIGTERM');
 });
