@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import "dotenv/config";
 
 const {
   BOT_TOKEN,
@@ -23,12 +23,6 @@ if (!ADMIN_USER_ID) {
   throw new Error('Missing required env var: ADMIN_USER_ID');
 }
 
-const gramMissingEnv = [];
-if (!TG_API_ID) gramMissingEnv.push('TG_API_ID');
-if (!TG_API_HASH) gramMissingEnv.push('TG_API_HASH');
-if (!TG_SESSION_STRING) gramMissingEnv.push('TG_SESSION_STRING');
-if (!SOURCE_CHANNELS) gramMissingEnv.push('SOURCE_CHANNELS');
-
 const fetchLimit = Number(FETCH_LIMIT || 20);
 
 export const config = {
@@ -36,13 +30,12 @@ export const config = {
   targetChatId: TARGET_CHAT_ID,
   adminUserId: Number(ADMIN_USER_ID),
   tgApiId: TG_API_ID ? Number(TG_API_ID) : null,
-  tgApiHash: TG_API_HASH || null,
-  tgSessionString: TG_SESSION_STRING || null,
+  tgApiHash: TG_API_HASH || '',
+  tgSessionString: TG_SESSION_STRING || '',
+  sourceChannelsRaw: SOURCE_CHANNELS || '',
   sourceChannels: String(SOURCE_CHANNELS || '')
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean),
-  fetchLimit: Number.isFinite(fetchLimit) && fetchLimit > 0 ? fetchLimit : 20,
-  gramMissingEnv,
-  gramEnabled: gramMissingEnv.length === 0
+  fetchLimit: Number.isFinite(fetchLimit) && fetchLimit > 0 ? fetchLimit : 20
 };

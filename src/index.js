@@ -56,10 +56,11 @@ function sanitizeChannels(channels) {
 
 function getMissingGramEnv() {
   const missing = [];
-  if (!config.tgApiId && config.tgApiId !== 0) missing.push('TG_API_ID');
+
+  if (!config.tgApiId) missing.push('TG_API_ID');
   if (!config.tgApiHash) missing.push('TG_API_HASH');
   if (!config.tgSessionString) missing.push('TG_SESSION_STRING');
-  if (!config.sourceChannels || config.sourceChannels.length === 0) missing.push('SOURCE_CHANNELS');
+  if (!config.sourceChannelsRaw) missing.push('SOURCE_CHANNELS');
 
   if (config.tgApiId !== null && !Number.isFinite(config.tgApiId)) {
     missing.push('TG_API_ID not number');
@@ -172,7 +173,7 @@ bot.command('postlast', async (ctx) => {
   if (!isAdmin(ctx)) return;
 
   if (!channelFetcher) {
-    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || 'unknown error'}`);
+    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || ''}`);
   }
 
   const firstChannel = validSourceChannels[0];
@@ -199,7 +200,7 @@ bot.command('pull', async (ctx) => {
   if (!isAdmin(ctx)) return;
 
   if (!channelFetcher) {
-    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || 'unknown error'}`);
+    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || ''}`);
   }
 
   try {
