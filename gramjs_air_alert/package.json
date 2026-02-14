@@ -1,0 +1,15 @@
+{
+  "name": "gramjs-air-alert-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.mjs",
+    "gen:session": "node scripts/gen_session.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "gramjs": "^2.21.0",
+    "input": "^1.0.1"
+  }
+}
