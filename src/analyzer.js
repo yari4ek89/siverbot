@@ -1,5 +1,5 @@
 import { analyzeWithGemini, getLlmStatus } from './llmGemini.js';
-import { normalizeText } from './normalize.js';
+import { normalizeText, sanitizeOutput } from './normalize.js';
 import { getSourceProfile } from './sourceProfile.js';
 
 const KEYWORDS = {
@@ -11,16 +11,22 @@ const KEYWORDS = {
 
 const CHERNIHIV_PATTERNS = ['черніг', 'черниг', 'чернігівщ', 'черниговск', 'ніжин', 'нежин', 'прилук', 'бахмач', 'корюків', 'новгород сівер', 'новгород-сівер', 'сіверщина'];
 const SUMY_PATTERNS = ['сум', 'сумщ', 'сумська', 'суми', 'конотоп', 'шостк', 'охтирк', 'глухів', 'ромн'];
-const SUMY_TOPONYMS = ['вакалівщина', 'вакаливщина', 'vakalyvshchyna', 'vakalivshchyna'];
+
+const KNOWN_LOCATIONS = [
+  'вакалівщина', 'вакаливщина', 'vakalyvshchyna', 'vakalivshchyna',
+  'ніжин', 'нежин', 'прилуки', 'прилук', 'бахмач', 'корюківка', 'корюків', 'новгород-сіверський', 'новгород сівер',
+  'суми', 'сумська область', 'конотоп', 'шостка', 'охтирка', 'глухів', 'ромни', 'путивль', 'тростянець',
+  'чернігів', 'чернігівщина', 'чернигов',
+];
 
 function shortError(message, limit = 200) {
   if (!message) return 'невідома помилка';
-  return String(message).replace(/\s+/g, ' ').trim().slice(0, limit);
+  return sanitizeOutput(String(message).replace(/\s+/g, ' ').trim().slice(0, limit));
 }
 
 function detectRegions(textNorm) {
   const hitsC = CHERNIHIV_PATTERNS.some((p) => textNorm.includes(p));
-  const hitsS = SUMY_PATTERNS.some((p) => textNorm.includes(p)) || SUMY_TOPONYMS.some((p) => textNorm.includes(p));
+  const hitsS = SUMY_PATTERNS.some((p) => textNorm.includes(p)) || textNorm.includes('вакалівщина') || textNorm.includes('вакаливщина') || textNorm.includes('vakalyvshchyna') || textNorm.includes('vakalivshchyna');
 
   if (hitsC && hitsS) return ['both'];
   if (hitsC) return ['chernihiv'];
@@ -48,23 +54,54 @@ function titleByThreat(threatType, regionHits) {
   const map = {
     uav: `БПЛА: ${region}`,
     missile: `Ракетна небезпека: ${region}`,
-    aviation: `Авіаційна активність: ${region}`,
-    air_defense: `Активність ППО: ${region}`,
+    aviation: `Авіаційна загроза: ${region}`,
+    air_defense: `Повітряна небезпека: ${region}`,
     unknown: `Повітряна загроза: ${region}`,
   };
-  return map[threatType] || map.unknown;
+  return sanitizeOutput(map[threatType] || map.unknown);
 }
 
-function summaryByThreat(threatType, regionHits) {
-  const region = regionLabel(regionHits);
-  const map = {
-    uav: `За повідомленнями моніторингових каналів, зафіксовано повітряну загрозу із застосуванням БПЛА у межах регіону ${region}. Подано лише факт публікації без напрямків і прогнозів.`,
-    missile: `За повідомленнями моніторингових каналів, оприлюднено факт ракетної небезпеки для регіону ${region}. Публікація містить коротку безпечну сводку без координат.`,
-    aviation: `За повідомленнями моніторингових каналів, є ознаки авіаційної загрози для регіону ${region}. Подано стислу фактологічну інформацію без прогнозів.`,
-    air_defense: `За повідомленнями моніторингових каналів, згадується повітряна небезпека в контексті роботи ППО у регіоні ${region}. Без координат і маршрутів.`,
-    unknown: `Зафіксовано повідомлення про повітряну небезпеку для регіону ${region}. Подано лише факт публікації з відкритих джерел.`,
-  };
-  return map[threatType] || map.unknown;
+function extractDirectionPhrases(text) {
+  const out = [];
+  const patterns = [
+    /\bв\s+бік\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+    /\bкурс\s+на\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+    /\bнапрямок\s+[\p{L}\p{N}\-\s]{2,40}/giu,
+  ];
+
+  for (const re of patterns) {
+    const matches = text.match(re) || [];
+    for (const m of matches) {
+      const clean = sanitizeOutput(m).slice(0, 60).trim();
+      if (clean && !out.includes(clean)) out.push(clean);
+      if (out.length >= 3) return out;
+    }
+  }
+  return out;
+}
+
+function extractLocations(textNorm) {
+  const found = [];
+  for (const loc of KNOWN_LOCATIONS) {
+    if (textNorm.includes(loc) && !found.includes(loc)) found.push(loc);
+    if (found.length >= 3) break;
+  }
+  return found;
+}
+
+function buildFallbackSummary({ threatType, locations, directions, regionHits }) {
+  const threatLabel = {
+    uav: 'БПЛА',
+    missile: 'ракетну небезпеку',
+    aviation: 'авіаційну загрозу',
+    air_defense: 'повітряну небезпеку',
+    unknown: 'повітряну небезпеку',
+  }[threatType] || 'повітряну небезпеку';
+
+  const locText = locations.length ? ` Локації з повідомлення: ${locations.join(', ')}.` : '';
+  const dirText = directions.length ? ` Напрямки вказані у тексті: ${directions.join('; ')}.` : '';
+
+  return sanitizeOutput(`Зафіксовано повідомлення про ${threatLabel} у межах регіону ${regionLabel(regionHits)}.${locText}${dirText}`);
 }
 
 function fallback({ text, sourceName, config, llmError = null }) {
@@ -72,45 +109,29 @@ function fallback({ text, sourceName, config, llmError = null }) {
   const regionHits = detectRegions(textNorm);
   let threatType = detectThreatType(textNorm);
   const profile = getSourceProfile(sourceName, config);
+  const locations = extractLocations(textNorm);
+  const directions = extractDirectionPhrases(text);
 
-  if (threatType !== 'unknown') {
-    const shouldPost = !regionHits.includes('none');
-    return {
-      shouldPost,
-      regionHits,
-      threatType,
-      confidence: shouldPost ? 0.5 : 0.1,
-      title: titleByThreat(threatType, regionHits),
-      summary: shouldPost
-        ? summaryByThreat(threatType, regionHits)
-        : 'Повідомлення не відповідає фільтру повітряної небезпеки для Чернігівщини/Сумщини.',
-      reason: `LLM error: ${shortError(llmError || 'недоступний')}`,
-      language: 'uk',
-    };
-  }
-
-  if (profile.allowLocationOnly && !regionHits.includes('none')) {
+  if (threatType === 'unknown' && profile.allowLocationOnly && !regionHits.includes('none')) {
     threatType = profile.defaultThreatType;
-    return {
-      shouldPost: true,
-      regionHits,
-      threatType,
-      confidence: 0.65,
-      title: titleByThreat(threatType, regionHits),
-      summary: summaryByThreat(threatType, regionHits),
-      reason: 'Канал БПЛА-радар: локація трактується як повідомлення про загрозу з повітря.',
-      language: 'uk',
-    };
   }
+
+  const shouldPost = !regionHits.includes('none') && ['uav', 'missile', 'aviation', 'air_defense'].includes(threatType);
+
+  const reason = shouldPost && profile.allowLocationOnly && detectThreatType(textNorm) === 'unknown'
+    ? 'Локація з профільного радара інтерпретована як повітряна загроза.'
+    : `LLM error: ${shortError(llmError || 'недоступний')}`;
 
   return {
-    shouldPost: false,
+    shouldPost,
     regionHits,
-    threatType: 'unknown',
-    confidence: 0.1,
-    title: titleByThreat('unknown', regionHits),
-    summary: 'Повідомлення не відповідає фільтру повітряної небезпеки для Чернігівщини/Сумщини.',
-    reason: `LLM error: ${shortError(llmError || 'недоступний')}`,
+    threatType: shouldPost ? threatType : 'unknown',
+    confidence: shouldPost ? (profile.allowLocationOnly && detectThreatType(textNorm) === 'unknown' ? 0.65 : 0.5) : 0.1,
+    title: titleByThreat(shouldPost ? threatType : 'unknown', regionHits),
+    summary: shouldPost
+      ? buildFallbackSummary({ threatType, locations, directions, regionHits })
+      : 'Повідомлення не відповідає фільтру повітряної небезпеки для Чернігівщини/Сумщини.',
+    reason: sanitizeOutput(reason),
     language: 'uk',
   };
 }
@@ -128,15 +149,15 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
   "reason": string
 }
 Правила:
-- Публікувати лише повітряні загрози (БПЛА/ракети/авіація/ППО) для Чернігівщини та/або Сумщини.
+- Пиши українською.
+- Публікувати лише повітряні загрози для Чернігівщини та/або Сумщини.
 - Якщо згадана лише одна область, вкажи тільки її, не "both".
-- Джерело: ${sourceName}. Профіль джерела: defaultThreatType=${profile.defaultThreatType}, allowLocationOnly=${profile.allowLocationOnly}.
-- Якщо джерело UAV-радар, короткі повідомлення з локацією можуть означати БПЛА.
-- Не вигадуй загрозу, якщо джерело не має профілю UAV_ONLY або MISSILE_ONLY.
-- Заборонено координати, напрямки польоту, цілі, прогнози часу/ударів.
-- Усе поверни українською мовою.
+- НЕ згадуй джерела/канали/@юзернейми.
+- Локації/напрямки можна згадувати ТІЛЬКИ якщо вони є в оригінальному тексті. Не додавати нічого від себе.
+- Джерело: ${sourceName}. Профіль: defaultThreatType=${profile.defaultThreatType}, allowLocationOnly=${profile.allowLocationOnly}.
+- Якщо джерело не профільне, не припускай загрозу лише по локації.
+- Заборонено координати, цілі, прогнози часу/ударів.
 - Якщо невпевнено, should_post=false.
-Дозволені регіони: ${regions.join(',')}
 Текст повідомлення:\n${text}`;
 
   try {
@@ -150,16 +171,16 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
 
     const regionHits = Array.isArray(parsed.regions) && parsed.regions.length ? parsed.regions : ['none'];
     const threatType = parsed.threat_type || 'unknown';
-    const shouldPost = Boolean(parsed.should_post) && threatType !== 'unknown' && !regionHits.includes('none');
+    const shouldPost = !regionHits.includes('none') && ['uav', 'missile', 'aviation', 'air_defense'].includes(threatType);
 
     return {
       shouldPost,
       regionHits,
-      threatType,
+      threatType: shouldPost ? threatType : 'unknown',
       confidence: Number(parsed.confidence ?? 0),
-      title: parsed.title || titleByThreat(threatType, regionHits),
-      summary: parsed.summary || summaryByThreat(threatType, regionHits),
-      reason: parsed.reason || 'Класифікація виконана LLM',
+      title: sanitizeOutput(parsed.title || titleByThreat(threatType, regionHits)),
+      summary: sanitizeOutput(parsed.summary || buildFallbackSummary({ threatType, locations: [], directions: [], regionHits })),
+      reason: sanitizeOutput(parsed.reason || 'Класифікація виконана LLM'),
       language: 'uk',
     };
   } catch (error) {

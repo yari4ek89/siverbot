@@ -1,3 +1,5 @@
+import { sanitizeOutput } from './normalize.js';
+
 const emojiByThreat = {
   uav: '🛸',
   missile: '🚀',
@@ -19,7 +21,7 @@ export async function postEvent({ bot, targetChatId, event }) {
   const { analysis } = event;
   const emoji = emojiByThreat[analysis.threatType] || emojiByThreat.unknown;
 
-  const text = `${emoji} ${analysis.title}\n${analysis.summary}\nРегіон: ${regionLabel(analysis.regionHits)}`;
+  const text = sanitizeOutput(`${emoji} ${analysis.title}\n${analysis.summary}\nРегіон: ${regionLabel(analysis.regionHits)}`);
 
   await bot.telegram.sendMessage(targetChatId, text, {
     disable_web_page_preview: true,
