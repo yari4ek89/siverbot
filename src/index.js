@@ -7,7 +7,6 @@ import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
 import {
   analyzeMessage,
-  detectRegionsFromRaw,
   detectThreatFromRaw,
   buildEventKey,
   buildBaseEventKey,
@@ -307,7 +306,6 @@ bot.command('postlast', async (ctx) => {
 
   await ctx.reply([
     formatAnalysis(analysis),
-    `detectedRegionsFromRaw=${detectRegionsFromRaw(text).join(',')}`,
     `detectedThreatFromRaw=${detectThreatFromRaw(text)}`,
     `sourceProfile=${JSON.stringify(getSourceProfile(first, config))}`,
     `eventKey=${eventKey}`,
