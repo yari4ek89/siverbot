@@ -24,15 +24,19 @@ function shortError(message, limit = 200) {
   return sanitizeOutput(String(message).replace(/\s+/g, ' ').trim().slice(0, limit));
 }
 
-export function detectRegionsFromRaw(rawText) {
+function detectRegionStringFromRaw(rawText) {
   const rawNorm = normalizeText(rawText);
   const hitsC = CHERNIHIV_PATTERNS.some((p) => rawNorm.includes(p));
   const hitsS = SUMY_PATTERNS.some((p) => rawNorm.includes(p));
 
-  if (hitsC && hitsS) return ['both'];
-  if (hitsC) return ['chernihiv'];
-  if (hitsS) return ['sumy'];
-  return ['none'];
+  if (hitsC && hitsS) return 'both';
+  if (hitsC) return 'chernihiv';
+  if (hitsS) return 'sumy';
+  return 'none';
+}
+
+export function detectRegionsFromRaw(rawText) {
+  return toRegionHits(detectRegionStringFromRaw(rawText));
 }
 
 export function detectThreatFromRaw(rawText) {
@@ -44,21 +48,36 @@ export function detectThreatFromRaw(rawText) {
   return 'unknown';
 }
 
-function regionLabel(regionHits) {
-  if (regionHits.includes('both')) return 'Чернігівщина + Сумщина';
-  if (regionHits.includes('chernihiv')) return 'Чернігівщина';
-  if (regionHits.includes('sumy')) return 'Сумщина';
+function toRegionString(value) {
+  if (Array.isArray(value)) {
+    const first = value[0];
+    return typeof first === 'string' ? first : 'none';
+  }
+  return typeof value === 'string' ? value : 'none';
+}
+
+function toRegionHits(region) {
+  if (region === 'both') return ['both'];
+  if (region === 'chernihiv') return ['chernihiv'];
+  if (region === 'sumy') return ['sumy'];
+  return ['none'];
+}
+
+function regionLabel(region) {
+  if (region === 'both') return 'Чернігівщина + Сумщина';
+  if (region === 'chernihiv') return 'Чернігівщина';
+  if (region === 'sumy') return 'Сумщина';
   return 'Регіон не визначено';
 }
 
-function titleByThreat(threatType, regionHits) {
-  const region = regionLabel(regionHits);
+function titleByThreat(threatType, region) {
+  const regionText = regionLabel(region);
   const map = {
-    uav: `БПЛА: ${region}`,
-    missile: `Ракетна небезпека: ${region}`,
-    aviation: `Авіаційна загроза: ${region}`,
-    air_defense: `Повітряна небезпека: ${region}`,
-    unknown: `Повітряна загроза: ${region}`,
+    uav: `БПЛА: ${regionText}`,
+    missile: `Ракетна небезпека: ${regionText}`,
+    aviation: `Авіаційна загроза: ${regionText}`,
+    air_defense: `Повітряна небезпека: ${regionText}`,
+    unknown: `Повітряна загроза: ${regionText}`,
   };
   return map[threatType] || map.unknown;
 }
@@ -92,7 +111,7 @@ function extractLocationsFromRaw(rawText) {
   return found;
 }
 
-function buildSummaryFromRaw({ threatType, regions, rawText }) {
+function buildSummaryFromRaw({ threatType, region, rawText }) {
   const threatLabel = {
     uav: 'БПЛА',
     missile: 'ракетну небезпеку',
@@ -106,7 +125,7 @@ function buildSummaryFromRaw({ threatType, regions, rawText }) {
 
   const locText = locations.length ? ` Локації з тексту: ${locations.join(', ')}.` : '';
   const dirText = directions.length ? ` Напрямки з тексту: ${directions.join('; ')}.` : '';
-  return `Зафіксовано повідомлення про ${threatLabel} у межах регіону ${regionLabel(regions)}.${locText}${dirText}`;
+  return `Зафіксовано повідомлення про ${threatLabel} у межах регіону ${regionLabel(region)}.${locText}${dirText}`;
 }
 
 function clampConfidence(value) {
@@ -115,53 +134,54 @@ function clampConfidence(value) {
   return Math.max(0, Math.min(1, num));
 }
 
-function finalizeResult(input) {
-  const result = {
-    shouldPost: Boolean(input.shouldPost),
-    regionHits: Array.isArray(input.regionHits) && input.regionHits.length ? input.regionHits : ['none'],
-    threatType: input.threatType || 'unknown',
-    confidence: clampConfidence(input.confidence),
-    title: sanitizeOutput(input.title || ''),
-    summary: sanitizeOutput(input.summary || ''),
-    reason: sanitizeOutput(input.reason || ''),
-    language: 'uk',
-  };
+function finalizeResult(result) {
+  result.regions = toRegionString(result.regions);
+  result.threat_type = result.threat_type || 'unknown';
+  result.confidence = clampConfidence(result.confidence);
 
-  const regionsNone = result.regionHits.includes('none');
-  if (result.threatType === 'unknown' || regionsNone) {
-    result.shouldPost = false;
+  if (result.regions && result.regions !== 'none' && result.threat_type && result.threat_type !== 'unknown') {
+    result.should_post = true;
   } else {
-    result.shouldPost = true;
+    result.should_post = false;
   }
+
+  result.title = sanitizeOutput(result.title || '');
+  result.summary = sanitizeOutput(result.summary || '');
+  result.reason = sanitizeOutput(result.reason || '');
+  result.language = 'uk';
+
+  // compatibility fields for existing code
+  result.shouldPost = result.should_post;
+  result.regionHits = toRegionHits(result.regions);
+  result.threatType = result.threat_type;
 
   return result;
 }
 
-function fallbackResult({ rawText, sourceName, config, llmError }) {
-  const regions = detectRegionsFromRaw(rawText);
-  let threatType = detectThreatFromRaw(rawText);
+function buildFallbackResult({ rawText, sourceName, config, llmError }) {
   const profile = getSourceProfile(sourceName, config);
+  const detectedRegion = detectRegionStringFromRaw(rawText);
+  let detectedThreat = detectThreatFromRaw(rawText);
 
-  if (threatType === 'unknown' && profile.allowLocationOnly && !regions.includes('none')) {
-    threatType = profile.defaultThreatType;
+  if (detectedThreat === 'unknown' && profile.allowLocationOnly && detectedRegion !== 'none') {
+    detectedThreat = profile.defaultThreatType;
   }
 
-  const locationOnly = detectThreatFromRaw(rawText) === 'unknown' && profile.allowLocationOnly && !regions.includes('none');
-  const title = titleByThreat(threatType, regions);
-  const summary = buildSummaryFromRaw({ threatType, regions, rawText });
-  const reason = locationOnly
-    ? 'Локація з профільного радара інтерпретована як повітряна загроза.'
-    : `LLM error: ${shortError(llmError || 'недоступний')}`;
+  const locationOnly = detectThreatFromRaw(rawText) === 'unknown' && profile.allowLocationOnly && detectedRegion !== 'none';
 
-  return finalizeResult({
-    shouldPost: false,
-    regionHits: regions,
-    threatType,
+  const result = {
+    should_post: false,
+    regions: detectedRegion,
+    threat_type: detectedThreat,
     confidence: locationOnly ? 0.65 : 0.5,
-    title,
-    summary,
-    reason,
-  });
+    title: titleByThreat(detectedThreat, detectedRegion),
+    summary: buildSummaryFromRaw({ threatType: detectedThreat, region: detectedRegion, rawText }),
+    reason: locationOnly
+      ? 'Локація з профільного радара інтерпретована як повітряна загроза.'
+      : `LLM error: ${shortError(llmError || 'недоступний')}`,
+  };
+
+  return finalizeResult(result);
 }
 
 export async function analyzeMessage({ text, sourceName, regions, config, logger }) {
@@ -200,21 +220,31 @@ export async function analyzeMessage({ text, sourceName, regions, config, logger
       logger,
     });
 
+    const detectedRegion = detectRegionStringFromRaw(rawText);
+    const detectedThreat = detectThreatFromRaw(rawText);
+
     const result = {
-      shouldPost: Boolean(parsed.should_post),
-      regionHits: Array.isArray(parsed.regions) && parsed.regions.length ? parsed.regions : ['none'],
-      threatType: parsed.threat_type || 'unknown',
+      should_post: Boolean(parsed.should_post),
+      regions: toRegionString(parsed.regions),
+      threat_type: parsed.threat_type || 'unknown',
       confidence: Number(parsed.confidence ?? 0),
-      title: parsed.title || titleByThreat(parsed.threat_type || 'unknown', Array.isArray(parsed.regions) ? parsed.regions : ['none']),
-      summary: parsed.summary || buildSummaryFromRaw({ threatType: parsed.threat_type || 'unknown', regions: Array.isArray(parsed.regions) ? parsed.regions : ['none'], rawText }),
+      title: parsed.title || titleByThreat(parsed.threat_type || 'unknown', toRegionString(parsed.regions)),
+      summary: parsed.summary || buildSummaryFromRaw({ threatType: parsed.threat_type || 'unknown', region: toRegionString(parsed.regions), rawText }),
       reason: parsed.reason || 'Класифікація виконана LLM',
     };
+
+    if (detectedRegion !== 'none') {
+      result.regions = detectedRegion;
+    }
+    if (detectedThreat !== 'unknown') {
+      result.threat_type = detectedThreat;
+    }
 
     return finalizeResult(result);
   } catch (error) {
     const llm = getLlmStatus();
     const modelInfo = llm.lastTriedModel ? ` (модель=${llm.lastTriedModel})` : '';
-    return fallbackResult({
+    return buildFallbackResult({
       rawText,
       sourceName,
       config,
