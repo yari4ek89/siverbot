@@ -306,7 +306,14 @@ bot.command('pull', async (ctx) => {
   const processed = await processItems(tick.items);
   lastTickStats = { ...tick, ...processed, at: new Date().toISOString() };
 
-  await ctx.reply(`pull done: fetched=${tick.fetchedTotal}, new=${tick.newTotal}, analyzed=${processed.analyzed}, posted=${processed.posted}`);
+  const pullDebug = Object.entries(tick.perChannelStats || {})
+    .map(([ch, st]) => `${ch}: lastIdBefore=${st.lastIdBefore}, maxIdFetched=${st.maxIdFetched}, newCount=${st.new}`)
+    .join('\n');
+
+  await ctx.reply([
+    `pull done: fetched=${tick.fetchedTotal}, new=${tick.newTotal}, analyzed=${processed.analyzed}, posted=${processed.posted}`,
+    pullDebug || 'no per-channel stats',
+  ].join('\n'));
 });
 
 bot.command('postlast', async (ctx) => {

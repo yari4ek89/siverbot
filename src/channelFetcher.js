@@ -5,7 +5,6 @@ export class ChannelFetcher {
     this.limit = limit;
     this.stateStore = stateStore;
     this.logger = logger;
-    this.firstTickDone = false;
   }
 
   async tick() {
@@ -14,26 +13,35 @@ export class ChannelFetcher {
     let fetchedTotal = 0;
 
     for (const channel of this.channels) {
-      perChannelStats[channel] = { fetched: 0, new: 0, lastMsgId: this.stateStore.getLastMsgId(channel) };
+      const lastIdBefore = this.stateStore.getLastMsgId(channel) || 0;
+      perChannelStats[channel] = {
+        fetched: 0,
+        new: 0,
+        lastIdBefore,
+        maxIdFetched: lastIdBefore,
+      };
+
       try {
-        const messages = await this.client.getMessages(channel, { limit: this.limit });
-        const sorted = [...messages].sort((a, b) => a.id - b.id);
-        fetchedTotal += sorted.length;
-        perChannelStats[channel].fetched = sorted.length;
+        const latest = await this.client.getMessages(channel, { limit: this.limit });
+        const sortedLatest = [...latest].sort((a, b) => a.id - b.id);
 
-        const maxId = sorted.length ? sorted[sorted.length - 1].id : this.stateStore.getLastMsgId(channel);
-        const knownLast = this.stateStore.getLastMsgId(channel);
+        fetchedTotal += sortedLatest.length;
+        perChannelStats[channel].fetched = sortedLatest.length;
 
-        if (!this.firstTickDone && knownLast === 0) {
+        const maxId = sortedLatest.length ? sortedLatest[sortedLatest.length - 1].id : lastIdBefore;
+        perChannelStats[channel].maxIdFetched = maxId;
+
+        if (lastIdBefore === 0) {
           this.stateStore.setLastMsgId(channel, maxId || 0);
-          perChannelStats[channel].lastMsgId = maxId || 0;
           continue;
         }
 
-        for (const msg of sorted) {
-          if (!msg?.id || msg.id <= knownLast) continue;
+        const newMsgs = sortedLatest.filter((m) => m?.id && m.id > lastIdBefore);
+
+        for (const msg of newMsgs) {
           const text = msg.message?.trim();
           if (!text || text.length < 15) continue;
+
           items.push({
             sourceName: channel,
             sourceId: String(msg.peerId?.channelId ?? channel),
@@ -44,9 +52,8 @@ export class ChannelFetcher {
           perChannelStats[channel].new += 1;
         }
 
-        if (maxId && maxId > knownLast) {
+        if (maxId && maxId > lastIdBefore) {
           this.stateStore.setLastMsgId(channel, maxId);
-          perChannelStats[channel].lastMsgId = maxId;
         }
       } catch (error) {
         this.logger?.warn(`Channel fetch failed for ${channel}:`, error?.message || error);
@@ -54,7 +61,6 @@ export class ChannelFetcher {
       }
     }
 
-    this.firstTickDone = true;
     return {
       items,
       fetchedTotal,
