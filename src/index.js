@@ -5,13 +5,7 @@ import { StateStore } from './stateStore.js';
 import { normalizeText, sanitizeOutput } from './normalize.js';
 import { createGramClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
-import {
-  analyzeMessage,
-  detectThreatFromRaw,
-  buildEventKey,
-  buildBaseEventKey,
-  isUpdateCompared,
-} from './analyzer.js';
+import { analyzeMessage } from './analyzer.js';
 import { Confirmer } from './confirmer.js';
 import { postEvent, buildPreviewText } from './poster.js';
 import { getLlmStatus, listModels } from './llmGemini.js';
@@ -43,6 +37,35 @@ function isAdmin(ctx) {
 function shortError(message, limit = 200) {
   if (!message) return 'none';
   return String(message).replace(/\s+/g, ' ').trim().slice(0, limit);
+}
+
+function dedupe(arr, max = 3) {
+  return [...new Set((arr || []).filter(Boolean))].slice(0, max);
+}
+
+function buildEventKey(analysis) {
+  const threat = normalizeText(analysis.threat_type || analysis.threatType || 'unknown');
+  const region = normalizeText(analysis.regions || analysis.regionHits?.[0] || 'none');
+  const locations = dedupe((analysis.locations || []).map((x) => normalizeText(x))).sort().join('-') || 'noloc';
+  const count = Number.isFinite(Number(analysis.count)) ? String(Number(analysis.count)) : 'nocount';
+  return `${threat}|${region}|${locations}|${count}`;
+}
+
+function buildBaseEventKey(analysis) {
+  const threat = normalizeText(analysis.threat_type || analysis.threatType || 'unknown');
+  const region = normalizeText(analysis.regions || analysis.regionHits?.[0] || 'none');
+  return `${threat}|${region}`;
+}
+
+function isUpdateCompared(prev, next) {
+  if (!prev) return false;
+  const prevLoc = new Set(prev.locations || []);
+  const nextLoc = new Set(next.locations || []);
+  const expandedLocations = [...nextLoc].some((x) => !prevLoc.has(x));
+  const prevCount = Number.isFinite(Number(prev.count)) ? Number(prev.count) : null;
+  const nextCount = Number.isFinite(Number(next.count)) ? Number(next.count) : null;
+  const increasedCount = nextCount !== null && (prevCount === null || nextCount > prevCount);
+  return expandedLocations || increasedCount;
 }
 
 function getEventTtlMin(threatType) {
@@ -306,7 +329,6 @@ bot.command('postlast', async (ctx) => {
 
   await ctx.reply([
     formatAnalysis(analysis),
-    `detectedThreatFromRaw=${detectThreatFromRaw(text)}`,
     `sourceProfile=${JSON.stringify(getSourceProfile(first, config))}`,
     `eventKey=${eventKey}`,
     `decision=${skipReason}`,
