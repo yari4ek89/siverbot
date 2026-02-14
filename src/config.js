@@ -4,9 +4,6 @@ const {
   BOT_TOKEN,
   TARGET_CHAT_ID,
   ADMIN_USER_ID,
-  ALERTS_TOKEN,
-  ALERTS_POLL_SEC,
-  ALERTS_REGION_TITLES,
   TG_API_ID,
   TG_API_HASH,
   TG_SESSION_STRING,
@@ -26,10 +23,6 @@ if (!ADMIN_USER_ID) {
   throw new Error('Missing required env var: ADMIN_USER_ID');
 }
 
-if (!ALERTS_TOKEN) {
-  throw new Error('Missing required env var: ALERTS_TOKEN');
-}
-
 if (!TG_API_ID) {
   throw new Error('Missing required env var: TG_API_ID');
 }
@@ -46,21 +39,12 @@ if (!SOURCE_CHANNELS) {
   throw new Error('Missing required env var: SOURCE_CHANNELS');
 }
 
-const alertsPollSec = Number(ALERTS_POLL_SEC || 20);
 const fetchLimit = Number(FETCH_LIMIT || 20);
 
 export const config = {
   botToken: BOT_TOKEN,
   targetChatId: TARGET_CHAT_ID,
   adminUserId: Number(ADMIN_USER_ID),
-  alertsToken: ALERTS_TOKEN,
-  alertsPollSec: Number.isFinite(alertsPollSec) && alertsPollSec > 0 ? alertsPollSec : 20,
-  alertsRegionTitles: new Set(
-    String(ALERTS_REGION_TITLES || '')
-      .split(',')
-      .map((x) => x.trim())
-      .filter(Boolean)
-  ),
   tgApiId: Number(TG_API_ID),
   tgApiHash: TG_API_HASH,
   tgSessionString: TG_SESSION_STRING,

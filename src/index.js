@@ -1,31 +1,14 @@
 import { Telegraf } from 'telegraf';
 import { config } from './config.js';
-import { AlertsWatcher } from './alertsWatcher.js';
 import { createClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
 
 const bot = new Telegraf(config.botToken);
-const watcher = new AlertsWatcher({
-  token: config.alertsToken,
-  regionTitles: config.alertsRegionTitles
-});
 
-let gramClient = null;
 let channelFetcher = null;
-
-let pollingInProgress = false;
-let skippedTicks = 0;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
-}
-
-function nowLocalTime() {
-  return new Date().toLocaleTimeString('uk-UA', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit'
-  });
 }
 
 async function sendToTarget(text) {
@@ -37,18 +20,6 @@ async function sendToTarget(text) {
 async function postIncomingText(text, sourceName = null) {
   await sendToTarget(text);
   console.log(`POST_OK target=${config.targetChatId}${sourceName ? ` source=${sourceName}` : ''}`);
-}
-
-async function notifyAdmin(text) {
-  if (!config.adminUserId) return;
-
-  try {
-    await bot.telegram.sendMessage(config.adminUserId, text, {
-      disable_web_page_preview: true
-    });
-  } catch (error) {
-    console.error('ADMIN_NOTIFY_ERROR', error);
-  }
 }
 
 bot.use(async (ctx, next) => {
@@ -76,16 +47,6 @@ bot.command('debug', (ctx) => {
   );
 });
 
-bot.command('alerts', (ctx) => {
-  const activeNow = [...watcher.prevActive].map((key) => key.split('|')[2]).filter(Boolean);
-
-  if (activeNow.length === 0) {
-    return ctx.reply('Немає активних тривог');
-  }
-
-  return ctx.reply(`Активні тривоги:\n${activeNow.map((x) => `• ${x}`).join('\n')}`);
-});
-
 bot.command('sources', (ctx) => {
   if (!channelFetcher) {
     return ctx.reply('Source fetcher ще не ініціалізовано');
@@ -110,40 +71,6 @@ bot.catch((err) => {
   console.error('BOT_ERROR', err);
 });
 
-async function pollAlerts() {
-  if (pollingInProgress) return;
-  if (skippedTicks > 0) {
-    skippedTicks -= 1;
-    return;
-  }
-
-  pollingInProgress = true;
-
-  try {
-    const result = await watcher.tick();
-
-    for (const oblast of result.started) {
-      await postIncomingText(`🚨 Повітряна тривога: ${oblast}\nЧас: ${nowLocalTime()}`);
-    }
-
-    for (const oblast of result.ended) {
-      await postIncomingText(`✅ Відбій: ${oblast}\nЧас: ${nowLocalTime()}`);
-    }
-  } catch (error) {
-    if (error?.status === 401) {
-      console.error('ALERTS_AUTH_ERROR 401');
-      await notifyAdmin('⚠️ Alerts API: 401 Unauthorized. Перевірте ALERTS_TOKEN.');
-    } else if (error?.status === 429) {
-      skippedTicks = 2;
-      console.error('ALERTS_RATE_LIMIT 429: skipping next 2 ticks');
-    } else {
-      console.error('ALERTS_POLL_ERROR', error);
-    }
-  } finally {
-    pollingInProgress = false;
-  }
-}
-
 async function pollChannels() {
   if (!channelFetcher) return;
 
@@ -165,12 +92,7 @@ async function pollChannels() {
 
 console.log('START');
 bot.launch().then(async () => {
-  void pollAlerts();
-  setInterval(() => {
-    void pollAlerts();
-  }, config.alertsPollSec * 1000);
-
-  gramClient = await createClient();
+  const gramClient = await createClient();
   channelFetcher = new ChannelFetcher(gramClient, config.sourceChannels, config.fetchLimit);
 
   void pollChannels();
