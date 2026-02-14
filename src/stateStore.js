@@ -5,9 +5,13 @@ const defaultState = {
   lastMsgIdByChannel: {},
   dedup: {},
   eventDedup: {},
+  eventBaseMeta: {},
   postingMode: 'auto',
   pendingQueue: {},
   nextPendingId: 1,
+  llmMode: 'off',
+  llmCooldownUntil: 0,
+  llmLastError: null,
 };
 
 export class StateStore {
@@ -30,6 +34,7 @@ export class StateStore {
         lastMsgIdByChannel: parsed.lastMsgIdByChannel || {},
         dedup: parsed.dedup || {},
         eventDedup: parsed.eventDedup || {},
+        eventBaseMeta: parsed.eventBaseMeta || {},
         pendingQueue: parsed.pendingQueue || {},
       };
     } catch {
@@ -74,6 +79,19 @@ export class StateStore {
     this.saveState();
   }
 
+  getEventBaseMeta(baseKey) {
+    this.cleanupDedup();
+    return this.state.eventBaseMeta[baseKey] || null;
+  }
+
+  putEventBaseMeta(baseKey, meta, ttlMin) {
+    this.state.eventBaseMeta[baseKey] = {
+      ...meta,
+      expiresAt: Date.now() + ttlMin * 60 * 1000,
+    };
+    this.saveState();
+  }
+
   cleanupDedup() {
     const now = Date.now();
     let changed = false;
@@ -92,6 +110,13 @@ export class StateStore {
       }
     }
 
+    for (const [k, meta] of Object.entries(this.state.eventBaseMeta)) {
+      if (!meta?.expiresAt || meta.expiresAt <= now) {
+        delete this.state.eventBaseMeta[k];
+        changed = true;
+      }
+    }
+
     if (changed) this.saveState();
   }
 
@@ -105,6 +130,36 @@ export class StateStore {
     this.state.postingMode = mode;
     this.saveState();
     return true;
+  }
+
+  getLlmMode() {
+    const mode = this.state.llmMode;
+    return ['off', 'smart'].includes(mode) ? mode : 'off';
+  }
+
+  setLlmMode(mode) {
+    if (!['off', 'smart'].includes(mode)) return false;
+    this.state.llmMode = mode;
+    this.saveState();
+    return true;
+  }
+
+  getLlmCooldownUntil() {
+    return Number(this.state.llmCooldownUntil || 0);
+  }
+
+  setLlmCooldownUntil(ts) {
+    this.state.llmCooldownUntil = Number(ts || 0);
+    this.saveState();
+  }
+
+  getLlmLastError() {
+    return this.state.llmLastError || null;
+  }
+
+  setLlmLastError(err) {
+    this.state.llmLastError = err ? String(err) : null;
+    this.saveState();
   }
 
   listPending() {

@@ -39,6 +39,8 @@ if (sourceChannels.length === 0) {
   throw new Error('SOURCE_CHANNELS must include at least one valid channel starting with @');
 }
 
+const llmMode = (process.env.LLM_MODE || 'off').trim().toLowerCase();
+
 export const config = {
   botToken: getRequired('BOT_TOKEN'),
   targetChatId: getRequired('TARGET_CHAT_ID'),
@@ -56,6 +58,7 @@ export const config = {
   geminiApiKey: (process.env.GEMINI_API_KEY || '').trim(),
   geminiModel: process.env.GEMINI_MODEL || 'gemini-1.5-flash',
   llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS ?? 12000),
+  llmMode: ['off', 'smart'].includes(llmMode) ? llmMode : 'off',
   regions: (process.env.REGIONS || 'chernihiv,sumy').split(',').map((x) => x.trim().toLowerCase()),
   minSourcesDay: Number(process.env.MIN_SOURCES_DAY ?? 2),
   minSourcesNight: Number(process.env.MIN_SOURCES_NIGHT ?? 1),

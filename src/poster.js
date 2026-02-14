@@ -15,7 +15,7 @@ function regionPhrase(region) {
   return 'регіону';
 }
 
-function humanThreatLine(threatType, region) {
+function threatLine(threatType, region, isUpdate = false) {
   const rp = regionPhrase(region);
   const map = {
     uav: `Є БПЛА по ${rp}.`,
@@ -24,37 +24,30 @@ function humanThreatLine(threatType, region) {
     air_defense: `Робота ППО по ${rp}.`,
     unknown: `Є повітряна загроза по ${rp}.`,
   };
-  return map[threatType] || map.unknown;
+  const base = map[threatType] || map.unknown;
+  return isUpdate ? `Оновлення: ${base}` : base;
 }
 
 function locationsLine(locations = [], directions = []) {
   if (!locations.length) return 'Деталей по локаціях поки немає.';
-
   const items = locations.slice(0, 3).map((loc, idx) => {
     const dir = directions[idx];
-    if (!dir) return loc;
-    return `${loc} (${dir})`;
+    return dir ? `${loc} (${dir})` : loc;
   });
-
   return `Локації: ${items.join(', ')}.`;
 }
 
-export function buildPreviewText(analysis) {
-  const emoji = emojiByThreat[analysis.threat_type || analysis.threatType] || emojiByThreat.unknown;
+export function buildPreviewText(analysis, opts = {}) {
   const threatType = analysis.threat_type || analysis.threatType || 'unknown';
   const region = analysis.regions || (analysis.regionHits?.[0] ?? 'none');
-
-  const line1 = `${emoji} ${humanThreatLine(threatType, region)}`;
+  const emoji = emojiByThreat[threatType] || emojiByThreat.unknown;
+  const line1 = `${emoji} ${threatLine(threatType, region, opts.isUpdate || analysis.isUpdate)}`;
   const line2 = locationsLine(analysis.locations || [], analysis.directions || []);
-
   return sanitizeOutput(`${line1}\n${line2}`);
 }
 
 export async function postEvent({ bot, targetChatId, event }) {
   const { analysis } = event;
-  const text = buildPreviewText(analysis);
-
-  await bot.telegram.sendMessage(targetChatId, text, {
-    disable_web_page_preview: true,
-  });
+  const text = buildPreviewText(analysis, { isUpdate: analysis.isUpdate });
+  await bot.telegram.sendMessage(targetChatId, text, { disable_web_page_preview: true });
 }
