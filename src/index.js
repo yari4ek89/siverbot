@@ -4,6 +4,8 @@ import { createClient } from './gramjsClient.js';
 import { ChannelFetcher } from './channelFetcher.js';
 
 const bot = new Telegraf(config.botToken);
+const PID = process.pid;
+const INSTANCE_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 let channelFetcher = null;
 let isLaunched = false;
@@ -20,11 +22,11 @@ async function sendToTarget(text) {
 
 async function postIncomingText(text, sourceName = null) {
   await sendToTarget(text);
-  console.log(`POST_OK target=${config.targetChatId}${sourceName ? ` source=${sourceName}` : ''}`);
+  console.log(`POST_OK pid=${PID} instance=${INSTANCE_ID} target=${config.targetChatId}${sourceName ? ` source=${sourceName}` : ''}`);
 }
 
 bot.use(async (ctx, next) => {
-  console.log('HANDLER_MIDDLEWARE');
+  console.log(`HANDLER_MIDDLEWARE pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!ctx.from) return;
 
@@ -33,7 +35,7 @@ bot.use(async (ctx, next) => {
   }
 
   if (!isAdmin(ctx)) {
-    console.log(`IGNORE from=${ctx.from.id} chat=${ctx.chat?.id ?? 'n/a'}`);
+    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from.id} chat=${ctx.chat?.id ?? 'n/a'}`);
     return;
   }
 
@@ -41,10 +43,10 @@ bot.use(async (ctx, next) => {
 });
 
 bot.start((ctx) => {
-  console.log('HANDLER_START');
+  console.log(`HANDLER_START pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!isAdmin(ctx)) {
-    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
     return;
   }
 
@@ -52,10 +54,10 @@ bot.start((ctx) => {
 });
 
 bot.command('ping', (ctx) => {
-  console.log('HANDLER_COMMAND ping');
+  console.log(`HANDLER_COMMAND ping pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!isAdmin(ctx)) {
-    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
     return;
   }
 
@@ -63,23 +65,23 @@ bot.command('ping', (ctx) => {
 });
 
 bot.command('debug', (ctx) => {
-  console.log('HANDLER_COMMAND debug');
+  console.log(`HANDLER_COMMAND debug pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!isAdmin(ctx)) {
-    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
     return;
   }
 
   ctx.reply(
-    `admin=${config.adminUserId} | here_chat=${ctx.chat.id} | target=${config.targetChatId} | from=${ctx.from.id}`
+    `admin=${config.adminUserId} | here_chat=${ctx.chat.id} | target=${config.targetChatId} | from=${ctx.from.id} | pid=${PID} instance=${INSTANCE_ID}`
   );
 });
 
 bot.command('sources', (ctx) => {
-  console.log('HANDLER_COMMAND sources');
+  console.log(`HANDLER_COMMAND sources pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!isAdmin(ctx)) {
-    console.log(`IGNORE from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
+    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
     return;
   }
 
@@ -96,14 +98,14 @@ bot.on('text', async (ctx) => {
   const text = ctx.message.text?.trim();
   if (!text || text.startsWith('/')) return;
 
-  console.log(`MSG_IN from=${ctx.from.id} chat=${ctx.chat.id} text=${JSON.stringify(text)}`);
+  console.log(`MSG_IN pid=${PID} instance=${INSTANCE_ID} from=${ctx.from.id} chat=${ctx.chat.id} text=${JSON.stringify(text)}`);
 
   await postIncomingText(text);
   await ctx.reply('Отправлено.');
 });
 
 bot.catch((err) => {
-  console.error('BOT_ERROR', err);
+  console.error(`BOT_ERROR pid=${PID} instance=${INSTANCE_ID}`, err);
 });
 
 async function pollChannels() {
@@ -111,17 +113,17 @@ async function pollChannels() {
 
   try {
     const newItems = await channelFetcher.tick();
-    console.log(`CH_FETCH_OK channels=${config.sourceChannels.length}`);
+    console.log(`CH_FETCH_OK pid=${PID} instance=${INSTANCE_ID} channels=${config.sourceChannels.length}`);
 
     if (newItems.length > 0) {
-      console.log(`CH_NEW ${newItems.length}`);
+      console.log(`CH_NEW pid=${PID} instance=${INSTANCE_ID} ${newItems.length}`);
     }
 
     for (const item of newItems) {
       await postIncomingText(item.text, item.sourceName);
     }
   } catch (error) {
-    console.error('CH_FETCH_ERR', error);
+    console.error(`CH_FETCH_ERR pid=${PID} instance=${INSTANCE_ID}`, error);
   }
 }
 
@@ -129,7 +131,7 @@ async function main() {
   if (isLaunched) return;
   isLaunched = true;
 
-  console.log('START');
+  console.log(`START pid=${PID} instance=${INSTANCE_ID}`);
   await bot.launch();
 
   const gramClient = await createClient();
