@@ -7,24 +7,65 @@ const bot = new Telegraf(config.botToken);
 const PID = process.pid;
 const INSTANCE_ID = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
+let gramStatus = {
+  enabled: false,
+  initialized: false,
+  lastInitError: null,
+  lastTickError: null,
+  lastTickAt: null,
+  lastTickFetched: 0,
+  lastTickNew: 0
+};
 let channelFetcher = null;
+let validSourceChannels = [];
+let invalidSourceChannels = [];
 let isLaunched = false;
 
 function isAdmin(ctx) {
   return Number(ctx.from?.id) === config.adminUserId;
 }
 
-function formatTickDate(value) {
-  if (!value) return '-';
-  const d = value instanceof Date ? value : new Date(value);
+function formatTickDate(ts) {
+  if (!ts) return '-';
+  const d = new Date(ts);
   if (Number.isNaN(d.getTime())) return '-';
   return d.toLocaleString('uk-UA');
 }
 
 function compactText(text, max = 60) {
   const clean = String(text || '').replace(/\s+/g, ' ').trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, max)}…`;
+  return clean.length <= max ? clean : `${clean.slice(0, max)}…`;
+}
+
+function sanitizeChannels(channels) {
+  const valid = [];
+  const invalid = [];
+
+  for (const raw of channels) {
+    const ch = String(raw || '').trim();
+    if (!ch) continue;
+    if (!ch.startsWith('@') || /\s/.test(ch)) {
+      invalid.push(ch);
+      continue;
+    }
+    valid.push(ch);
+  }
+
+  return { valid, invalid };
+}
+
+function getMissingGramEnv() {
+  const missing = [];
+  if (!config.tgApiId && config.tgApiId !== 0) missing.push('TG_API_ID');
+  if (!config.tgApiHash) missing.push('TG_API_HASH');
+  if (!config.tgSessionString) missing.push('TG_SESSION_STRING');
+  if (!config.sourceChannels || config.sourceChannels.length === 0) missing.push('SOURCE_CHANNELS');
+
+  if (config.tgApiId !== null && !Number.isFinite(config.tgApiId)) {
+    missing.push('TG_API_ID not number');
+  }
+
+  return missing;
 }
 
 async function sendToTarget(text) {
@@ -38,14 +79,41 @@ async function postIncomingText(text, sourceName = null) {
   console.log(`POST_OK pid=${PID} instance=${INSTANCE_ID} target=${config.targetChatId}${sourceName ? ` source=${sourceName}` : ''}`);
 }
 
+async function initGramIfPossible() {
+  const missing = getMissingGramEnv();
+  const { valid, invalid } = sanitizeChannels(config.sourceChannels);
+  validSourceChannels = valid;
+  invalidSourceChannels = invalid;
+
+  if (missing.length > 0 || validSourceChannels.length === 0) {
+    gramStatus.enabled = false;
+    gramStatus.initialized = false;
+    const reasons = [...missing];
+    if (validSourceChannels.length === 0) reasons.push('SOURCE_CHANNELS has no valid channels');
+    gramStatus.lastInitError = `missing env: ${reasons.join(', ')}`;
+    console.log(`GRAM_DISABLED ${gramStatus.lastInitError}`);
+    return;
+  }
+
+  gramStatus.enabled = true;
+
+  try {
+    const client = await createClient();
+    channelFetcher = new ChannelFetcher(client, validSourceChannels, config.fetchLimit);
+    gramStatus.initialized = true;
+    gramStatus.lastInitError = null;
+  } catch (error) {
+    gramStatus.initialized = false;
+    gramStatus.lastInitError = error?.stack || error?.message || String(error);
+    console.error('GRAM_INIT_ERR', error);
+  }
+}
+
 bot.use(async (ctx, next) => {
   console.log(`HANDLER_MIDDLEWARE pid=${PID} instance=${INSTANCE_ID}`);
 
   if (!ctx.from) return;
-
-  if (ctx.message?.text?.startsWith('/')) {
-    return next();
-  }
+  if (ctx.message?.text?.startsWith('/')) return next();
 
   if (!isAdmin(ctx)) {
     console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from.id} chat=${ctx.chat?.id ?? 'n/a'}`);
@@ -57,34 +125,19 @@ bot.use(async (ctx, next) => {
 
 bot.start((ctx) => {
   console.log(`HANDLER_START pid=${PID} instance=${INSTANCE_ID}`);
-
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
+  if (!isAdmin(ctx)) return;
   ctx.reply('Готово. Я принимаю сообщения только от админа.');
 });
 
 bot.command('ping', (ctx) => {
   console.log(`HANDLER_COMMAND ping pid=${PID} instance=${INSTANCE_ID}`);
-
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
+  if (!isAdmin(ctx)) return;
   ctx.reply('pong');
 });
 
 bot.command('debug', (ctx) => {
   console.log(`HANDLER_COMMAND debug pid=${PID} instance=${INSTANCE_ID}`);
-
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
+  if (!isAdmin(ctx)) return;
   ctx.reply(
     `admin=${config.adminUserId} | here_chat=${ctx.chat.id} | target=${config.targetChatId} | from=${ctx.from.id} | pid=${PID} instance=${INSTANCE_ID}`
   );
@@ -92,68 +145,75 @@ bot.command('debug', (ctx) => {
 
 bot.command('sources', (ctx) => {
   console.log(`HANDLER_COMMAND sources pid=${PID} instance=${INSTANCE_ID}`);
+  if (!isAdmin(ctx)) return;
 
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
-  const parsed = config.sourceChannels.length > 0 ? config.sourceChannels.join(', ') : '(empty)';
-
-  if (!config.gramEnabled) {
-    return ctx.reply(
-      `GramJS disabled\nmissing=${config.gramMissingEnv.join(', ')}\nsourceChannelsParsed=${parsed}`
-    );
-  }
-
-  if (!channelFetcher) {
-    return ctx.reply(`Source fetcher ще не ініціалізовано\nsourceChannelsParsed=${parsed}`);
-  }
-
-  const map = channelFetcher.getLastMsgIdMap();
-  const stats = channelFetcher.getDiagnostics();
-  const lines = config.sourceChannels.map((ch) => `${ch}: lastMsgId=${map.get(ch) || '-'}`);
+  const parsed = config.sourceChannels.length ? config.sourceChannels.join(', ') : '(empty)';
+  const map = channelFetcher ? channelFetcher.getLastMsgIdMap() : new Map();
+  const channelLines = validSourceChannels.map((ch) => `${ch}: lastMsgId=${map.get(ch) ?? '-'}`);
 
   return ctx.reply(
     [
-      `sourceChannelsParsed=${parsed}`,
-      ...lines,
-      `lastTickAt=${formatTickDate(stats.lastTickAt)}`,
-      `lastTickFetchedCount=${stats.lastTickFetchedCount}`,
-      `lastTickNewCount=${stats.lastTickNewCount}`,
-      `lastError=${stats.lastError || '-'}`
+      `enabled=${gramStatus.enabled}`,
+      `initialized=${gramStatus.initialized}`,
+      `parsedChannels=${parsed}`,
+      `invalid channels skipped=${invalidSourceChannels.length ? invalidSourceChannels.join(', ') : '-'}`,
+      ...channelLines,
+      `lastInitError=${gramStatus.lastInitError || '-'}`,
+      `lastTickAt=${formatTickDate(gramStatus.lastTickAt)}`,
+      `lastTickFetched=${gramStatus.lastTickFetched}`,
+      `lastTickNew=${gramStatus.lastTickNew}`,
+      `lastTickError=${gramStatus.lastTickError || '-'}`
     ].join('\n')
   );
 });
 
-bot.command('pull', async (ctx) => {
-  console.log(`HANDLER_COMMAND pull pid=${PID} instance=${INSTANCE_ID}`);
-
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
-  if (!config.gramEnabled) {
-    return ctx.reply(`GramJS disabled\nmissing=${config.gramMissingEnv.join(', ')}`);
-  }
+bot.command('postlast', async (ctx) => {
+  console.log(`HANDLER_COMMAND postlast pid=${PID} instance=${INSTANCE_ID}`);
+  if (!isAdmin(ctx)) return;
 
   if (!channelFetcher) {
-    return ctx.reply('Source fetcher ще не ініціалізовано');
+    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || 'unknown error'}`);
+  }
+
+  const firstChannel = validSourceChannels[0];
+  if (!firstChannel) {
+    return ctx.reply('Fetcher not initialized: no valid SOURCE_CHANNELS');
   }
 
   try {
-    const result = await pollChannels({ manual: true });
-    const preview = result.items
+    const last = await channelFetcher.getLatestFromChannel(firstChannel);
+    if (!last?.text) {
+      return ctx.reply(`No text message in ${firstChannel}`);
+    }
+
+    await postIncomingText(`[TEST_POSTLAST]\n${last.text}`, last.sourceName);
+    return ctx.reply(`Posted [TEST_POSTLAST] from ${firstChannel} #${last.msgId}`);
+  } catch (error) {
+    gramStatus.lastTickError = error?.stack || error?.message || String(error);
+    return ctx.reply(`postlast error: ${error?.message || String(error)}`);
+  }
+});
+
+bot.command('pull', async (ctx) => {
+  console.log(`HANDLER_COMMAND pull pid=${PID} instance=${INSTANCE_ID}`);
+  if (!isAdmin(ctx)) return;
+
+  if (!channelFetcher) {
+    return ctx.reply(`Fetcher not initialized: ${gramStatus.lastInitError || 'unknown error'}`);
+  }
+
+  try {
+    const { items, fetchedCount } = await pollChannels({ manual: true });
+    const preview = items
       .slice(0, 2)
       .map((it) => `${it.sourceName} #${it.msgId}: ${compactText(it.text, 60)}`)
       .join('\n');
 
     return ctx.reply(
       [
-        `newCount=${result.newCount}`,
-        `fetchedCount=${result.fetchedCount}`,
-        `lastError=${channelFetcher.getDiagnostics().lastError || '-'}`,
+        `newCount=${items.length}`,
+        `fetchedCount=${fetchedCount}`,
+        `lastError=${gramStatus.lastTickError || '-'}`,
         preview ? `sample:\n${preview}` : null
       ]
         .filter(Boolean)
@@ -161,42 +221,8 @@ bot.command('pull', async (ctx) => {
     );
   } catch (error) {
     return ctx.reply(
-      `newCount=0\nfetchedCount=${channelFetcher.getDiagnostics().lastTickFetchedCount}\nlastError=${error?.message || String(error)}`
+      `newCount=0\nfetchedCount=${gramStatus.lastTickFetched}\nlastError=${error?.message || String(error)}`
     );
-  }
-});
-
-bot.command('postlast', async (ctx) => {
-  console.log(`HANDLER_COMMAND postlast pid=${PID} instance=${INSTANCE_ID}`);
-
-  if (!isAdmin(ctx)) {
-    console.log(`IGNORE pid=${PID} instance=${INSTANCE_ID} from=${ctx.from?.id ?? 'n/a'} chat=${ctx.chat?.id ?? 'n/a'}`);
-    return;
-  }
-
-  if (!config.gramEnabled) {
-    return ctx.reply(`GramJS disabled\nmissing=${config.gramMissingEnv.join(', ')}`);
-  }
-
-  if (!channelFetcher) {
-    return ctx.reply('Source fetcher ще не ініціалізовано');
-  }
-
-  const firstChannel = config.sourceChannels[0];
-  if (!firstChannel) {
-    return ctx.reply('SOURCE_CHANNELS порожній');
-  }
-
-  try {
-    const last = await channelFetcher.getLatestFromChannel(firstChannel);
-    if (!last || !last.text) {
-      return ctx.reply(`Немає текстового повідомлення в ${firstChannel}`);
-    }
-
-    await postIncomingText(`[TEST_POSTLAST]\n${last.text}`, last.sourceName);
-    return ctx.reply(`Опубліковано test post з ${firstChannel} #${last.msgId}`);
-  } catch (error) {
-    return ctx.reply(`postlast error: ${error?.message || String(error)}`);
   }
 });
 
@@ -205,7 +231,6 @@ bot.on('text', async (ctx) => {
   if (!text || text.startsWith('/')) return;
 
   console.log(`MSG_IN pid=${PID} instance=${INSTANCE_ID} from=${ctx.from.id} chat=${ctx.chat.id} text=${JSON.stringify(text)}`);
-
   await postIncomingText(text);
   await ctx.reply('Отправлено.');
 });
@@ -216,34 +241,33 @@ bot.catch((err) => {
 
 async function pollChannels({ manual = false } = {}) {
   if (!channelFetcher) {
-    return { items: [], fetchedCount: 0, newCount: 0, perChannel: [] };
+    return { items: [], fetchedCount: 0 };
   }
 
   console.log(`CH_TICK start pid=${PID} instance=${INSTANCE_ID}${manual ? ' manual=1' : ''}`);
 
   try {
-    const result = await channelFetcher.tick();
+    const { items, fetchedCount, perChannel } = await channelFetcher.tick();
+    gramStatus.lastTickAt = Date.now();
+    gramStatus.lastTickFetched = fetchedCount;
+    gramStatus.lastTickNew = items.length;
+    gramStatus.lastTickError = null;
 
-    for (const ch of result.perChannel) {
-      console.log(
-        `CH_FETCH channel=${ch.channel} fetched=${ch.fetched} maxId=${ch.maxId} lastIdBefore=${ch.lastIdBefore} new=${ch.newCount}`
-      );
+    for (const ch of perChannel) {
+      console.log(`CH_FETCH channel=${ch.channel} fetched=${ch.fetched} maxId=${ch.maxId} lastIdBefore=${ch.lastIdBefore} new=${ch.newCount}`);
     }
 
-    console.log(`CH_TICK done newTotal=${result.newCount}`);
+    console.log(`CH_TICK done newTotal=${items.length}`);
 
-    if (result.newCount > 0) {
-      console.log(`CH_NEW pid=${PID} instance=${INSTANCE_ID} ${result.newCount}`);
-    }
-
-    for (const item of result.items) {
+    for (const item of items) {
       await postIncomingText(item.text, item.sourceName);
     }
 
-    return result;
+    return { items, fetchedCount, perChannel };
   } catch (error) {
+    gramStatus.lastTickError = error?.stack || error?.message || String(error);
     console.error(`CH_FETCH_ERR pid=${PID} instance=${INSTANCE_ID}`, error);
-    throw error;
+    return { items: [], fetchedCount: 0 };
   }
 }
 
@@ -254,16 +278,10 @@ async function main() {
   console.log(`START pid=${PID} instance=${INSTANCE_ID}`);
   await bot.launch();
 
-  if (!config.gramEnabled) {
-    console.log(`GRAM_DISABLED missing env: ${config.gramMissingEnv.join(", ")}`);
-    return;
-  }
+  await initGramIfPossible();
 
-  const gramClient = await createClient();
-  channelFetcher = new ChannelFetcher(gramClient, config.sourceChannels, config.fetchLimit);
-
-  void pollChannels();
   setInterval(() => {
+    if (!channelFetcher) return;
     void pollChannels();
   }, 15_000);
 }

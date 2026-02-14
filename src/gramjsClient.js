@@ -3,7 +3,11 @@ import { StringSession } from 'telegram/sessions/index.js';
 import { config } from './config.js';
 
 export async function createClient() {
-  const session = new StringSession(config.tgSessionString);
+  if (!Number.isFinite(config.tgApiId)) {
+    throw new Error('TG_API_ID not number');
+  }
+
+  const session = new StringSession(config.tgSessionString || '');
   const client = new TelegramClient(session, config.tgApiId, config.tgApiHash, {
     connectionRetries: 5
   });
